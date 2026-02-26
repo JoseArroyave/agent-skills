@@ -46,6 +46,20 @@ TIME_RANGE="$(echo "$JSON_INPUT" | jq -r '.time_range // empty')"
 # ---------- Helpers ----------
 stderr() { printf "%s\n" "$*" >&2; }
 
+needs_web_by_heuristic() {
+  local q="$1"
+  local q_lower
+  q_lower="$(echo "$q" | tr '[:upper:]' '[:lower:]')"
+
+  # Señales típicas de tiempo real
+  if echo "$q_lower" | grep -E -q \
+    "(hoy|ahora|actual|último|ultimos|últimos|reciente|precio|cotización|cuánto quedó|marcador|noticia|news|today|current|latest|price|score|stock|update|breaking)"; then
+    return 0  # YES
+  fi
+
+  return 1  # NO
+}
+
 # Decide si la pregunta requiere info actual (web) usando una mini-llamada a Gemini SIN tools.
 # Devuelve:
 #   0 => YES (usar google_search)
@@ -81,6 +95,9 @@ should_use_web_via_gemini() {
 
   # Si falla la clasificación, por ahorro asumimos NO (no web)
   if [[ $curl_code -ne 0 || -z "$resp_with_code" ]]; then
+    if needs_web_by_heuristic "$q"; then
+      return 0
+    fi
     return 1
   fi
 
@@ -88,6 +105,9 @@ should_use_web_via_gemini() {
   body="$(echo "$resp_with_code" | sed '/^__HTTP_STATUS__:/d')"
 
   if [[ -z "$http" || "$http" -lt 200 || "$http" -ge 300 ]]; then
+    if needs_web_by_heuristic "$q"; then
+      return 0
+    fi
     return 1
   fi
 
@@ -106,6 +126,12 @@ should_use_web_via_gemini() {
   ans="$(echo "$ans" | tr -d '\r' | tr '\n' ' ' | tr '[:lower:]' '[:upper:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
   if echo "$ans" | grep -q "YES"; then
+    return 0
+  fi
+
+  # Si no respondió YES explícitamente,
+  # aplicar heurística antes de asumir NO
+  if needs_web_by_heuristic "$q"; then
     return 0
   fi
 
@@ -210,6 +236,7 @@ normalize_gemini_to_tavilyish_json() {
       );
 
   {
+  used_web: ( (gm.grounding_chunks // []) | length > 0 ),
   answer: answer_text,
   provider: "gemini",
   results: results,
