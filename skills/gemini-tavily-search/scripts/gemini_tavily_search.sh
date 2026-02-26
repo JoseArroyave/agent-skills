@@ -129,8 +129,12 @@ should_use_web_via_gemini() {
     return 0
   fi
 
-  # Si no respondió YES explícitamente,
-  # aplicar heurística antes de asumir NO
+  # Si respondió NO explícitamente, respeta NO
+  if echo "$ans" | grep -q "NO"; then
+    return 1
+  fi
+
+  # Si no fue claro, aplica heurística
   if needs_web_by_heuristic "$q"; then
     return 0
   fi
@@ -156,10 +160,11 @@ build_gemini_body() {
 
 normalize_tavily_to_unified() {
   jq -c '{
-    provider: "tavily",
-    answer: null,
     results: (.results // [] | map({title, url, snippet: (.content // null)})),
-    fallback: true
+    provider: "tavily",
+    used_web: true,
+    fallback: true,
+    answer: null
   }'
 }
 
@@ -235,9 +240,14 @@ normalize_gemini_to_tavilyish_json() {
         }
       );
 
+  def used_web:
+    ( (gm.web_search_queries // []) | length > 0 )
+    or ( (gm.grounding_chunks // []) | length > 0 )
+    or ( (gm.search_entry_point.rendered_content? // "") != "" );
+
   {
-  used_web: ( (gm.grounding_chunks // []) | length > 0 ),
   answer: answer_text,
+  used_web: used_web,
   provider: "gemini",
   results: results,
   fallback: false
