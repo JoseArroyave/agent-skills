@@ -133,26 +133,29 @@ tavily_failed_json() {
 }
 
 normalize_tavily_to_unified() {
-  jq -c '{
-    provider: "tavily",
-    used_web: true,
-    fallback: true,
-    answer: (.answer // null),
-    results: (
-      (.results // [])
-      | map({
-          title,
-          url,
-          snippet: (
-            (.content // .raw_content // "")
-            | tostring
-            | gsub("\\s+";" ")
-            | if length > 800 then .[0:800] + "…" else . end
-          )
-        })
-    )
-  }'
-}
+   jq -c '{
+     provider: "tavily",
+     used_web: true,
+     fallback: true,
+     answer: (.answer // null),
+     results: (
+-      (.results // [])
+-      | map({
++      (.results // [])
++      | .[0:5]
++      | map({
+           title,
+           url,
+           snippet: (
+             (.content // .raw_content // "")
+             | tostring
+             | gsub("\\s+";" ")
+             | if length > 800 then .[0:800] + "…" else . end
+           )
+         })
+     )
+   }'
+ }
 
 tavily_fallback() {
   set +e
@@ -206,22 +209,24 @@ normalize_gemini_to_tavilyish_json() {
 
   # 5) Para cada chunk, juntar snippets relevantes (supports que lo referencian)
   def results:
-    chunks
-    | map(. as $c |
-        {
-          title: $c.title,
-          url: $c.url,
-          snippet: (
-            supports
-            | map(select(.indices | index($c.idx) != null) | .text)
-            | unique
-            | join(" ")
-            | gsub("\\s+";" ")
-            | if length > 400 then .[0:400] + "…" else . end
-          )
-        }
-      )
-    | map(select(.snippet != ""));
+     chunks
+     | map(. as $c |
+         {
+           title: $c.title,
+           url: $c.url,
+           snippet: (
+             supports
+             | map(select(.indices | index($c.idx) != null) | .text)
+             | unique
+             | join(" ")
+             | gsub("\\s+";" ")
+             | if length > 400 then .[0:400] + "…" else . end
+           )
+         }
+       )
+-    | map(select(.snippet != ""));
++    | map(select(.snippet != ""))
++    | .[0:5];
 
   def used_web:
     ( (gm.web_search_queries // []) | length > 0 )
