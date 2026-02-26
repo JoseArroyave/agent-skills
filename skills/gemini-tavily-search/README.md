@@ -173,7 +173,20 @@ The script always returns structured JSON in the following format:
       "snippet": "Relevant excerpt"
     }
   ],
+  "used_web": true | false,
   "fallback": false
+}
+```
+
+If Gemini answers without using web search:
+
+```json
+{
+  "answer": "Main textual answer",
+  "provider": "gemini",
+  "fallback": false,
+  "used_web": false,
+  "results": []
 }
 ```
 
@@ -182,9 +195,10 @@ If fallback occurs:
 ```json
 {
   "provider": "tavily",
-  "answer": null,
   "results": [...],
-  "fallback": true
+  "fallback": true,
+  "used_web": true,
+  "answer": null
 }
 ```
 
@@ -192,11 +206,12 @@ If both providers fail:
 
 ```json
 {
+  "error": "tavily_failed",
   "provider": "tavily",
-  "answer": null,
-  "results": [],
+  "used_web": true,
   "fallback": true,
-  "error": "tavily_failed"
+  "answer": null,
+  "results": []
 }
 ```
 
