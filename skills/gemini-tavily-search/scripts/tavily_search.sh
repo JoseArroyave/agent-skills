@@ -37,6 +37,14 @@ command -v jq   >/dev/null 2>&1 || { echo "Error: jq not found" >&2; exit 1; }
 
 : "${TAVILY_API_KEY:?Error: TAVILY_API_KEY is required (API-only mode)}"
 
+redact_text() {
+  local s="$1"
+  s="$(printf "%s" "$s" | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[REDACTED_EMAIL]/g')"
+  s="$(printf "%s" "$s" | sed -E 's/\b\+?[0-9][0-9 ()\.-]{6,}[0-9]\b/[REDACTED_PHONE]/g')"
+  s="$(printf "%s" "$s" | sed -E 's/\bsk-[A-Za-z0-9_-]{8,}\b/[REDACTED_KEY]/g')"
+  printf "%s" "$s"
+}
+
 # Validate JSON
 echo "$JSON_INPUT" | jq empty >/dev/null 2>&1 || { echo "Error: Invalid JSON input" >&2; exit 1; }
 
@@ -47,8 +55,12 @@ if [[ -z "$QUERY" || "$QUERY" == "null" ]]; then
   exit 1
 fi
 
+# Query minimization / redaction
+QUERY="$(redact_text "$QUERY")"
+JSON_INPUT="$(echo "$JSON_INPUT" | jq -c --arg q "$QUERY" '.query = $q')"
+
 # Build REST request payload (merge api_key into the JSON)
-PAYLOAD="$(echo "$JSON_INPUT" | jq --arg key "$TAVILY_API_KEY" '. + {api_key: $key}')"
+PAYLOAD="$(echo "$JSON_INPUT" | jq --arg key "$TAVILY_API_KEY" 'del(.api_key) + {api_key: $key}')"
 
 # Call Tavily REST API
 RESP="$(
