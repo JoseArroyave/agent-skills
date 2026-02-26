@@ -111,7 +111,7 @@ npx skills add JoseArroyave/agent-skills --skill gemini-tavily-search
 ## Usage (CLI)
 
 ```bash
-./scripts/gemini_tavily_search.sh '{"query":"Who won the euro 2024?","max_results":5}'
+./scripts/gemini_tavily_search.sh '{"query":"Who won the euro 2024?"}'
 ```
 
 ## Input

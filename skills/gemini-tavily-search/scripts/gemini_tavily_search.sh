@@ -3,7 +3,7 @@
 # Usage:
 #   ./scripts/gemini_tavily_search.sh '<json>'
 # Example:
-#   ./scripts/gemini_tavily_search.sh '{"query":"Who won the euro 2024?","max_results":5}'
+#   ./scripts/gemini_tavily_search.sh '{"query":"Who won the euro 2024?"}'
 
 set -euo pipefail
 
@@ -40,7 +40,6 @@ GEMINI_CLASSIFY_TIMEOUT_SECONDS=8
 GEMINI_TIMEOUT_SECONDS=20
 
 # Optional shaping
-MAX_RESULTS="$(echo "$JSON_INPUT" | jq -r '.max_results // empty')"
 TIME_RANGE="$(echo "$JSON_INPUT" | jq -r '.time_range // empty')"
 
 # ---------- Helpers ----------
