@@ -52,11 +52,12 @@ PAYLOAD="$(echo "$JSON_INPUT" | jq --arg key "$TAVILY_API_KEY" '. + {api_key: $k
 
 # Call Tavily REST API
 RESP="$(
-  curl -sS --connect-timeout 5 --max-time 25 \
-    -X POST "https://api.tavily.com/search" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD"
-)"
+     curl -sS --fail-with-body --proto '=https' --tlsv1.2 \
+     --connect-timeout 5 --max-time 25 \
+     -X POST "https://api.tavily.com/search" \
+     -H "Content-Type: application/json" \
+     -d "$PAYLOAD"
+ )"
 
 # Ensure JSON output (if Tavily returns HTML/error text, fail)
 echo "$RESP" | jq empty >/dev/null 2>&1 || { echo "Error: Tavily returned non-JSON" >&2; exit 1; }
