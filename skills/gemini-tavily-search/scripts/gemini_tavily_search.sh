@@ -134,11 +134,23 @@ tavily_failed_json() {
 
 normalize_tavily_to_unified() {
   jq -c '{
-    results: (.results // [] | map({title, url, snippet: (.content // null)})),
     provider: "tavily",
     used_web: true,
     fallback: true,
-    answer: null
+    answer: (.answer // null),
+    results: (
+      (.results // [])
+      | map({
+          title,
+          url,
+          snippet: (
+            (.content // .raw_content // "")
+            | tostring
+            | gsub("\\s+";" ")
+            | if length > 800 then .[0:800] + "…" else . end
+          )
+        })
+    )
   }'
 }
 
@@ -204,9 +216,12 @@ normalize_gemini_to_tavilyish_json() {
             | map(select(.indices | index($c.idx) != null) | .text)
             | unique
             | join(" ")
+            | gsub("\\s+";" ")
+            | if length > 400 then .[0:400] + "…" else . end
           )
         }
-      );
+      )
+    | map(select(.snippet != ""));
 
   def used_web:
     ( (gm.web_search_queries // []) | length > 0 )

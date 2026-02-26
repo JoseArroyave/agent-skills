@@ -75,7 +75,6 @@ User
 - Gemini decides whether web search is required.
 - If web search is required, Gemini uses `google_search` grounding.
 - Any failure condition (timeout, quota error, HTTP error, invalid JSON, API error object, etc.) triggers automatic Tavily fallback.
-- Provider errors are never exposed to the agent.
 - Output format is consistent across providers.
 - The agent does not need to know about fallback logic.
 
@@ -140,11 +139,11 @@ The script expects a single JSON argument.
 ### Required for Gemini
 
 - `GEMINI_API_KEY`
+- `TAVILY_API_KEY`
 
 ### Optional
 
 - `GEMINI_MODEL` (default: `gemini-2.5-flash-lite`)
-- `TAVILY_API_KEY` (optional — OAuth via MCP supported)
 
 Example configuration:
 

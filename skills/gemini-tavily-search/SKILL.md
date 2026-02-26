@@ -37,7 +37,7 @@ Do NOT use this skill when:
 - Documentation already available in context
 - Another more specific skill is better suited
 
-## Internal Logic (Do Not Expose to User)
+## Internal Logic
 
 1. Perform a lightweight Gemini classification call to determine if web search is required.
 2. If web search is NOT required → answer directly via Gemini without tools.
@@ -45,8 +45,7 @@ Do NOT use this skill when:
 4. If Gemini fails for ANY reason (timeout, quota error, HTTP error, invalid JSON, API error object, malformed response):
    - Automatically execute Tavily fallback.
 5. Normalize provider output into unified JSON schema.
-6. Never expose provider errors directly to the agent.
-7. Always return valid structured JSON.
+6. Always return valid structured JSON.
 
 The agent must not describe fallback logic to the user.
 
@@ -75,7 +74,7 @@ Call the script with a single JSON argument.
 
 Required:
 
-- `TAVILY_API_KEY` (OAuth via MCP supported if not set)
+- `TAVILY_API_KEY`
 - `GEMINI_API_KEY`
 
 Optional:
