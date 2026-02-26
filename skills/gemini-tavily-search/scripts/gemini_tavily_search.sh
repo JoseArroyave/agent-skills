@@ -17,18 +17,32 @@ fi
 command -v curl >/dev/null 2>&1 || { echo "Error: curl not found" >&2; exit 1; }
 command -v jq   >/dev/null 2>&1 || { echo "Error: jq not found" >&2; exit 1; }
 
-# Validate JSON
-if ! echo "$JSON_INPUT" | jq empty >/dev/null 2>&1; then
-  echo "Error: Invalid JSON input" >&2
-  exit 1
-fi
+: "${TAVILY_API_KEY:?Error: TAVILY_API_KEY is required (API-only mode)}"
 
-# Require query field
-QUERY="$(echo "$JSON_INPUT" | jq -r '.query // empty')"
-if [[ -z "$QUERY" || "$QUERY" == "null" ]]; then
-  echo "Error: 'query' field is required" >&2
-  exit 1
-fi
+redact_text() {
+  local s="$1"
+  s="$(printf "%s" "$s" | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[REDACTED_EMAIL]/g')"
+  s="$(printf "%s" "$s" | sed -E 's/\b\+?[0-9][0-9 ()\.-]{6,}[0-9]\b/[REDACTED_PHONE]/g')"
+  s="$(printf "%s" "$s" | sed -E 's/\bsk-[A-Za-z0-9_-]{8,}\b/[REDACTED_KEY]/g')"
+  printf "%s" "$s"
+}
+
+ # Validate JSON
+ echo "$JSON_INPUT" | jq empty >/dev/null 2>&1 || { echo "Error: Invalid JSON input" >&2; exit 1; }
+
+ # Require query
+ QUERY="$(echo "$JSON_INPUT" | jq -r '.query // empty')"
+ if [[ -z "$QUERY" || "$QUERY" == "null" ]]; then
+   echo "Error: 'query' field is required" >&2
+   exit 1
+ fi
+
+# Query minimization / redaction
+QUERY="$(redact_text "$QUERY")"
+JSON_INPUT="$(echo "$JSON_INPUT" | jq -c --arg q "$QUERY" '.query = $q')"
+
+# Build REST request payload (merge api_key into the JSON)
+PAYLOAD="$(echo "$JSON_INPUT" | jq --arg key "$TAVILY_API_KEY" '. + {api_key: $key}')"
 
 # ---------- Config ----------
 : "${GEMINI_API_KEY:=}"
@@ -39,8 +53,19 @@ GEMINI_URL="https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MOD
 GEMINI_CLASSIFY_TIMEOUT_SECONDS=8
 GEMINI_TIMEOUT_SECONDS=20
 
-# ---------- Helpers ----------
-stderr() { printf "%s\n" "$*" >&2; }
+ # ---------- Helpers ----------
+ stderr() { printf "%s\n" "$*" >&2; }
+
+redact_text() {
+  local s="$1"
+  # Emails
+  s="$(printf "%s" "$s" | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[REDACTED_EMAIL]/g')"
+  # Phones (heurístico, no perfecto)
+  s="$(printf "%s" "$s" | sed -E 's/\b\+?[0-9][0-9 ()\.-]{6,}[0-9]\b/[REDACTED_PHONE]/g')"
+  # Keys tipo sk-...
+  s="$(printf "%s" "$s" | sed -E 's/\bsk-[A-Za-z0-9_-]{8,}\b/[REDACTED_KEY]/g')"
+  printf "%s" "$s"
+}
 
 # Decide si la pregunta requiere info actual (web) usando una mini-llamada a Gemini SIN tools.
 # Devuelve:
