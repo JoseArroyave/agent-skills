@@ -1,4 +1,4 @@
-# Agent Skills
+# AI Agent Skills
 
 A personal collection of skills for AI agents. Feel free to use.
 
