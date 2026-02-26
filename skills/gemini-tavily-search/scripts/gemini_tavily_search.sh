@@ -39,45 +39,30 @@ GEMINI_URL="https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MOD
 GEMINI_CLASSIFY_TIMEOUT_SECONDS=8
 GEMINI_TIMEOUT_SECONDS=20
 
-# Optional shaping
-TIME_RANGE="$(echo "$JSON_INPUT" | jq -r '.time_range // empty')"
-
 # ---------- Helpers ----------
 stderr() { printf "%s\n" "$*" >&2; }
-
-needs_web_by_heuristic() {
-  local q="$1"
-  local q_lower
-  q_lower="$(echo "$q" | tr '[:upper:]' '[:lower:]')"
-
-  # Señales típicas de tiempo real
-  if echo "$q_lower" | grep -E -q \
-    "(hoy|ahora|actual|último|ultimos|últimos|reciente|precio|cotización|cuánto quedó|marcador|noticia|news|today|current|latest|price|score|stock|update|breaking)"; then
-    return 0  # YES
-  fi
-
-  return 1  # NO
-}
 
 # Decide si la pregunta requiere info actual (web) usando una mini-llamada a Gemini SIN tools.
 # Devuelve:
 #   0 => YES (usar google_search)
 #   1 => NO  (no usar google_search)
 should_use_web_via_gemini() {
+  if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+    return 1
+  fi
+
   local q="$1"
   local timeout="${GEMINI_CLASSIFY_TIMEOUT_SECONDS:-8}"
 
-  # Prompt corto y bien estricto
   local classify_body
   classify_body="$(jq -n --arg q "$q" '{
     contents: [{
       parts: [{
-        text: "Answer ONLY with YES or NO.\nQuestion: \($q)\nDoes this question require up-to-date web information (news, current events, prices, recently changed facts) to answer correctly?"
+        text: "Answer ONLY with YES or NO.\nQuestion: \($q)\nDo you need to look up sources on the web to answer this reliably (because it is time-sensitive, depends on current facts, or requires verification)? If stable general knowledge is sufficient, answer NO."
       }]
     }]
   }')"
 
-  # Llamada ligera (sin tools)
   local resp_with_code http body curl_code
   set +e
   resp_with_code="$(
@@ -92,11 +77,7 @@ should_use_web_via_gemini() {
   curl_code=$?
   set -e
 
-  # Si falla la clasificación, por ahorro asumimos NO (no web)
   if [[ $curl_code -ne 0 || -z "$resp_with_code" ]]; then
-    if needs_web_by_heuristic "$q"; then
-      return 0
-    fi
     return 1
   fi
 
@@ -104,14 +85,10 @@ should_use_web_via_gemini() {
   body="$(echo "$resp_with_code" | sed '/^__HTTP_STATUS__:/d')"
 
   if [[ -z "$http" || "$http" -lt 200 || "$http" -ge 300 ]]; then
-    if needs_web_by_heuristic "$q"; then
-      return 0
-    fi
     return 1
   fi
 
-  # Extrae texto del candidato
-  local ans
+  local ans ans_token
   ans="$(echo "$body" | jq -r '
     (.candidates // [])
     | map(.content.parts // [])
@@ -121,23 +98,10 @@ should_use_web_via_gemini() {
     | join(" ")
   ' 2>/dev/null || true)"
 
-  # Normaliza
   ans="$(echo "$ans" | tr -d '\r' | tr '\n' ' ' | tr '[:lower:]' '[:upper:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  ans_token="$(echo "$ans" | awk '{print $1}')"
 
-  if echo "$ans" | grep -q "YES"; then
-    return 0
-  fi
-
-  # Si respondió NO explícitamente, respeta NO
-  if echo "$ans" | grep -q "NO"; then
-    return 1
-  fi
-
-  # Si no fue claro, aplica heurística
-  if needs_web_by_heuristic "$q"; then
-    return 0
-  fi
-
+  [[ "$ans_token" == "YES" ]] && return 0
   return 1
 }
 
@@ -155,6 +119,17 @@ build_gemini_body() {
       contents: [{ parts: [{ text: $q }] }]
     }'
   fi
+}
+
+tavily_failed_json() {
+  jq -n '{
+    error: "tavily_failed",
+    provider: "tavily",
+    used_web: true,
+    fallback: true,
+    answer: null,
+    results: []
+  }'
 }
 
 normalize_tavily_to_unified() {
@@ -179,13 +154,7 @@ tavily_fallback() {
     return 0
   fi
 
-  jq -n '{
-    provider: "tavily",
-    answer: null,
-    results: [],
-    fallback: true,
-    error: "tavily_failed"
-  }'
+  tavily_failed_json
   return 0
 }
 
