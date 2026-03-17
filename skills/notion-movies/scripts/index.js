@@ -1,0 +1,484 @@
+import levenshtein from 'fast-levenshtein';
+import { Client } from '@notionhq/client';
+import dotenv from 'dotenv';
+import https from 'https';
+
+dotenv.config({ path: '/home/jose/.openclaw/.env' });
+
+/* =========================
+   ⚙️ CONFIG
+========================= */
+
+const notion = new Client({ auth: process.env.NOTION_KEY });
+
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
+const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
+
+const EMBEDDING_MODEL = 'nomic-embed-text:v1.5';
+const COLLECTION = 'movies';
+const VECTOR_SIZE = 768;
+
+/* =========================
+   🔎 DATABASE
+========================= */
+
+async function findDatabase(query) {
+  const res = await notion.search({
+    query,
+    filter: { value: "data_source", property: "object" }
+  });
+
+  if (!res.results.length) throw new Error(`Database not found: ${query}`);
+  return res.results[0].id;
+}
+
+async function getAllPages(databaseId) {
+  let pages = [];
+  let cursor;
+  let hasMore = true;
+
+  while (hasMore) {
+    const res = await notion.dataSources.query({
+      data_source_id: databaseId,
+      start_cursor: cursor
+    });
+
+    pages.push(...res.results);
+    hasMore = res.has_more;
+    cursor = res.next_cursor;
+  }
+
+  return pages;
+}
+
+/* =========================
+   🎬 TMDB
+========================= */
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve(JSON.parse(data)));
+    }).on('error', reject);
+  });
+}
+
+async function getMovieData(title) {
+  const search = await fetchJson(
+    `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`
+  );
+
+  if (!search.results?.length) {
+    return { error: 'NOT_FOUND' };
+  }
+
+  if (search.results.length > 1) {
+    return {
+      error: 'AMBIGUOUS',
+      options: search.results.slice(0, 5).map(m => ({
+        title: m.title,
+        year: m.release_date?.split('-')[0]
+      }))
+    };
+  }
+
+  const movie = search.results[0];
+
+  const details = await fetchJson(
+    `https://api.themoviedb.org/3/movie/${movie.id}?api_key=${TMDB_API_KEY}`
+  );
+
+  const credits = await fetchJson(
+    `https://api.themoviedb.org/3/movie/${movie.id}/credits?api_key=${TMDB_API_KEY}`
+  );
+
+  const director = credits.crew.find(c => c.job === 'Director')?.name;
+
+  return {
+    title: movie.title,
+    plot: movie.overview,
+    poster: movie.poster_path
+      ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+      : null,
+    genres: details.genres?.map(g => g.name) || [],
+    director,
+    year: movie.release_date?.split('-')[0],
+    runtime: details.runtime,
+    language: details.original_language,
+    actors: credits.cast.slice(0, 5).map(a => a.name)
+  };
+}
+
+/* =========================
+   📄 HELPERS
+========================= */
+
+function normalizeTitle(t) {
+  return t.toLowerCase().replace(/\(\d{4}\)/, '').trim();
+}
+
+function isDuplicate(a, b) {
+  return isFuzzy(normalizeTitle(a), normalizeTitle(b));
+}
+
+function getTitle(page) {
+  return page.properties['Nombre']?.title?.[0]?.text?.content;
+}
+
+function hasPortada(page) {
+  return (page.properties.Portada?.files || []).length > 0;
+}
+
+function hasDirector(page) {
+  return page.properties['Director/es']?.rich_text?.length > 0;
+}
+
+function hasGenres(page) {
+  return page.properties['Género']?.multi_select?.length > 0;
+}
+
+function hasEmoji(page) {
+  return page.icon?.type === 'emoji';
+}
+
+/* =========================
+   🖼️ ENRICH FUNCTIONS
+========================= */
+
+async function ensureYear(page, year) {
+  if (!year) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      'Año': { number: parseInt(year) }
+    }
+  });
+}
+
+async function ensureActors(page, actors) {
+  if (!actors?.length) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      'Actores': {
+        rich_text: [{ text: { content: actors.join(', ') } }]
+      }
+    }
+  });
+}
+
+async function ensureRuntime(page, runtime) {
+  if (!runtime) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      'Duración': { number: runtime }
+    }
+  });
+}
+
+async function ensureEmoji(page) {
+  if (hasEmoji(page)) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    icon: { type: 'emoji', emoji: '🎬' }
+  });
+}
+
+async function ensureDirector(page, director) {
+  if (hasDirector(page) || !director) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      'Director/es': {
+        rich_text: [{ text: { content: director } }]
+      }
+    }
+  });
+}
+
+async function ensureGenres(page, genres) {
+  if (hasGenres(page) || !genres.length) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      'Género': {
+        multi_select: genres.map(g => ({ name: g }))
+      }
+    }
+  });
+}
+
+async function ensurePortada(page, title, url) {
+  if (hasPortada(page) || !url) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      Portada: {
+        files: [
+          {
+            type: 'external',
+            external: { url },
+            name: title
+          }
+        ]
+      }
+    }
+  });
+}
+
+async function ensureCover(page, url) {
+  if (!url) return;
+
+  await notion.pages.update({
+    page_id: page.id,
+    cover: {
+      type: 'external',
+      external: { url }
+    }
+  });
+}
+
+async function ensurePlot(page, plot) {
+  if (!plot) return;
+
+  await notion.blocks.children.append({
+    block_id: page.id,
+    children: [
+      {
+        object: 'block',
+        type: 'callout',
+        callout: {
+          rich_text: [{ type: 'text', text: { content: 'Plot' } }],
+          icon: { type: 'emoji', emoji: '💡' }
+        }
+      },
+      {
+        object: 'block',
+        type: 'quote',
+        quote: {
+          rich_text: [{ type: 'text', text: { content: plot } }]
+        }
+      }
+    ]
+  });
+}
+
+/* =========================
+   🧠 EMBEDDINGS
+========================= */
+
+function inferThemes(movie) {
+  const text = (movie.plot || '').toLowerCase();
+
+  const themes = [];
+
+  if (text.includes('space')) themes.push('space');
+  if (text.includes('time')) themes.push('time');
+  if (text.includes('love')) themes.push('romance');
+  if (text.includes('war')) themes.push('war');
+  if (text.includes('future')) themes.push('futuristic');
+
+  return themes.join(', ');
+}
+
+function buildText(movie) {
+  return `
+Title: ${movie.title}
+Title: ${movie.title}
+
+Genres: ${movie.genres?.join(', ') || ''}
+Genres: ${movie.genres?.join(', ') || ''}
+
+Director: ${movie.director || ''}
+
+Plot: ${movie.plot || ''}
+
+Themes: ${inferThemes(movie)}
+Themes: ${inferThemes(movie)}
+`.trim();
+}
+
+async function embed(text) {
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        prompt: text
+      })
+    });
+
+    const json = await res.json();
+    return json.embedding;
+
+  } catch (e) {
+    console.error('Embedding failed:', e);
+    return new Array(VECTOR_SIZE).fill(0); // fallback seguro
+  }
+}
+/* =========================
+   🗄️ QDRANT
+========================= */
+
+async function upsertVector(movie) {
+  const vector = await embed(buildText(movie));
+
+  await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      points: [
+        {
+          id: movie.notionPageId,
+          vector,
+          payload: movie
+        }
+      ]
+    })
+  });
+}
+
+/* =========================
+   🧬 DUPLICATE
+========================= */
+
+function isFuzzy(a, b) {
+  return levenshtein.get(a.toLowerCase(), b.toLowerCase()) <= 2;
+}
+
+/* =========================
+   🚀 MAIN ACTIONS
+========================= */
+
+export async function addMovie({ title, databaseQuery }) {
+  const dbId = await findDatabase(databaseQuery);
+  const pages = await getAllPages(dbId);
+
+  const existing = pages.find(p =>
+    isDuplicate(getTitle(p), title)
+  );
+
+  if (existing) {
+    return {
+      duplicate: true,
+      message: 'Movie already exists, enriching instead'
+    };
+  }
+
+  await notion.pages.create({
+    parent: { data_source_id: dbId },
+    properties: {
+      Nombre: { title: [{ text: { content: title } }] }
+    }
+  });
+
+  return { success: true };
+}
+
+export async function enrichMovie({ title, databaseQuery }) {
+
+
+  const dbId = await findDatabase(databaseQuery);
+  const pages = await getAllPages(dbId);
+
+  const page = pages.find(p => getTitle(p) === title);
+  if (!page) throw new Error('Movie not found');
+
+  const data = await getMovieData(title);
+  if (!data) return { skipped: true };
+
+  if (data.error === 'NOT_FOUND') {
+    return {
+      error: 'Movie not found in TMDB'
+    };
+  }
+
+  if (data.error === 'AMBIGUOUS') {
+    return {
+      error: 'Multiple matches found',
+      options: data.options
+    };
+  }
+
+  await ensureEmoji(page);
+  await ensureDirector(page, data.director);
+  await ensureGenres(page, data.genres);
+  await ensureYear(page, data.year);
+  await ensureActors(page, data.actors);
+  await ensureRuntime(page, data.runtime);
+  await ensurePortada(page, title, data.poster);
+  await ensureCover(page, data.poster);
+  await ensurePlot(page, data.plot);
+
+  await upsertVector({
+    notionPageId: page.id,
+    title,
+    genres: data.genres,
+    director: data.director,
+    plot: data.plot
+  });
+
+  return { success: true };
+}
+
+function explainScore(query, payload, score) {
+  const reasons = [];
+  const q = query.toLowerCase();
+
+  const tokens = q.split(/\s+/);
+
+  if (payload.genres?.some(g =>
+    tokens.some(t => g.toLowerCase().includes(t))
+  )) {
+    reasons.push('genre similarity');
+  }
+
+  if (payload.director &&
+    tokens.some(t => payload.director.toLowerCase().includes(t))) {
+    reasons.push('director match');
+  }
+
+  if (payload.plot &&
+    tokens.some(t => payload.plot.toLowerCase().includes(t))) {
+    reasons.push('plot similarity');
+  }
+
+  return {
+    score: Number(score.toFixed(3)),
+    explanation: reasons.length
+      ? `Similar because: ${reasons.join(', ')}`
+      : 'General semantic similarity'
+  };
+}
+
+export async function searchMovies({ query }) {
+  const vector = await embed(query);
+
+  const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      vector,
+      limit: 5,
+      with_payload: true
+    })
+  });
+
+  const data = await res.json();
+
+  return data.result.map(r => ({
+    ...r.payload,
+    ...explainScore(query, r.payload, r.score)
+  }));
+}
