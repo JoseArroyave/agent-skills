@@ -381,7 +381,7 @@ npx skills add JoseArroyave/agent-skills --skill notion-movies
 
 ### Required
 
-* `NOTION_KEY`
+* `NOTION_API_KEY`
 * `TMDB_API_KEY`
 
 ### Optional

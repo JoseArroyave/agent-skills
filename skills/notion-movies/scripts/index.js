@@ -9,7 +9,7 @@ dotenv.config({ path: '/home/jose/.openclaw/.env' });
    ⚙️ CONFIG
 ========================= */
 
-const notion = new Client({ auth: process.env.NOTION_KEY });
+const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';

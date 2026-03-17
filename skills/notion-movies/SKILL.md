@@ -6,9 +6,9 @@ metadata:
     "openclaw":
       {
         "emoji": "🎬",
-        "requires": { "env": ["NOTION_KEY", "TMDB_API_KEY"] },
+        "requires": { "env": ["NOTION_API_KEY", "TMDB_API_KEY"] },
         "optional": { "env": ["QDRANT_URL", "OLLAMA_URL"] },
-        "primaryEnv": "NOTION_KEY"
+        "primaryEnv": "NOTION_API_KEY"
       }
   }
 ---
@@ -170,7 +170,7 @@ User → "I want something like Interstellar"
 
 Required:
 
-* `NOTION_KEY`
+* `NOTION_API_KEY`
 * `TMDB_API_KEY`
 
 Optional:
