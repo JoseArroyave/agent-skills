@@ -1,7 +1,6 @@
 ---
-name: notion-movies-search
+name: notion-movies
 description: Semantic search, intelligent enrichment, and duplicate detection for a Notion movie database using TMDB, embeddings, and Qdrant.
-homepage: https://qdrant.tech
 metadata:
   {
     "openclaw":
