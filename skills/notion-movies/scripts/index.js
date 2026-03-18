@@ -140,24 +140,72 @@ function getTitle(page) {
   return page.properties['Nombre']?.title?.[0]?.text?.content;
 }
 
+function getDirector(page) {
+  return page.properties['Director/es']?.rich_text?.[0]?.text?.content || '';
+}
+
+function getGenres(page) {
+  return page.properties['Género']?.multi_select?.map(g => g.name) || [];
+}
+
+function getThemes(page) {
+  return page.properties['Themes']?.multi_select?.map(t => t.name) || [];
+}
+
+function getActors(page) {
+  return page.properties['Actores']?.multi_select?.map(a => a.name) || [];
+}
+
 function hasPortada(page) {
   return (page.properties.Portada?.files || []).length > 0;
 }
 
 function hasDirector(page) {
-  return page.properties['Director/es']?.rich_text?.length > 0;
+  return getDirector(page) !== '';
 }
 
 function hasGenres(page) {
-  return page.properties['Género']?.multi_select?.length > 0;
+  return getGenres(page).length > 0;
 }
 
 function hasActors(page) {
-  return page.properties['Actores']?.multi_select?.length > 0;
+  return getActors(page).length > 0;
 }
 
 function hasEmoji(page) {
   return page.icon?.type === 'emoji';
+}
+
+function rerank(results, baseMovie) {
+  return results.map(r => {
+
+    let bonus = 0;
+
+    // 🎭 themes overlap
+    if (r.themes?.some(t => baseMovie.themes?.includes(t))) {
+      bonus += 0.1;
+    }
+
+    // 🎬 mismo género
+    if (r.genres?.some(g => baseMovie.genres?.includes(g))) {
+      bonus += 0.05;
+    }
+
+    return {
+      ...r,
+      final_score: r.score + bonus
+    };
+  })
+    .sort((a, b) => b.final_score - a.final_score);
+}
+
+async function findMovieInDB(title, databaseQuery) {
+  const dbId = await findDatabase(databaseQuery);
+  const pages = await getAllPages(dbId);
+
+  return pages.find(p =>
+    isDuplicate(getTitle(p), title)
+  );
 }
 
 function cleanTitle(title) {
@@ -475,6 +523,30 @@ async function ensureRating(page, rating) {
    🧠 EMBEDDINGS
 ========================= */
 
+async function findMovieInQdrantByTitle(title) {
+  const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/scroll`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      limit: 1,
+      with_payload: true,
+      with_vector: true, // 🔥 IMPORTANTE
+      filter: {
+        must: [
+          {
+            key: 'title',
+            match: { value: title }
+          }
+        ]
+      }
+    })
+  });
+
+  const data = await res.json();
+
+  return data.result?.points?.[0] || null;
+}
+
 function buildText(movie) {
   return `
     Movie: ${movie.title}
@@ -550,27 +622,54 @@ function isFuzzy(a, b) {
    🚀 MAIN ACTIONS
 ========================= */
 
-export async function recommendMovies({ title }) {
-  const vector = await embed(`Movie: ${title}`);
+export async function recommendMovies({ title, databaseQuery }) {
 
+  // 1. buscar en Notion
+  let page = await findMovieInDB(title, databaseQuery);
+
+  // 2. si no existe → crear + enriquecer
+  if (!page) {
+    console.log(`Movie not found. Adding + enriching: ${title}`);
+
+    await addMovie({ title, databaseQuery });
+    await enrichMovie({ title, databaseQuery });
+
+    page = await findMovieInDB(title, databaseQuery);
+  }
+
+  const titleFromPage = getTitle(page);
+
+  // 3. traer desde Qdrant (con vector)
+  const point = await findMovieInQdrantByTitle(titleFromPage);
+
+  if (!point) {
+    throw new Error('Movie not indexed in Qdrant');
+  }
+
+  // 🔥 usar el vector existente
+  const vector = point.vector;
+
+  // 4. búsqueda semántica REAL
   const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      vector,
-      limit: 5,
-      with_payload: true
+      with_payload: true,
+      limit: 10,
+      vector
     })
   });
 
   const data = await res.json();
 
-  if (!data.result) throw new Error(data.status?.error || 'Qdrant failed');
+  const results = data.result
+    .filter(r => r.id !== point.id)
+    .map(r => ({
+      ...r.payload,
+      score: r.score
+    }));
 
-  return data.result.map(r => ({
-    ...r.payload,
-    score: r.score
-  }));
+  return rerank(results, point.payload);
 }
 
 export async function indexAllMovies({ databaseQuery }) {
@@ -601,11 +700,11 @@ export async function indexAllMovies({ databaseQuery }) {
 
       console.log(`🎬 Processing: ${title}`);
 
-      const genres = page.properties['Género']?.multi_select?.map(g => g.name) || [];
       const plot = await extractPlotFromPage(page) || '';
-      const director = page.properties['Director/es']?.rich_text?.[0]?.text?.content || '';
+      const existingThemes = getThemes(page);
+      const director = getDirector(page);
+      const genres = getGenres(page);
 
-      const existingThemes = page.properties['Themes']?.multi_select?.map(t => t.name) || [];
       const themes = (!existingThemes.length) ? await extractThemesLLM(plot) : existingThemes;
 
       const payload = buildPayload({ director, genres, title, plot, page, themes });
@@ -685,7 +784,7 @@ export async function enrichMovie({ title, databaseQuery }) {
   await ensurePlot(page, data.plot);
   await ensureRating(page, data.rating);
 
-  const existingThemes = page.properties['Themes']?.multi_select?.map(t => t.name) || [];
+  const existingThemes = getThemes(page);
   const themes = (!existingThemes.length) ? await extractThemesLLM(data.plot) : existingThemes;
 
   const payload = buildPayload({
@@ -704,21 +803,30 @@ export async function enrichMovie({ title, databaseQuery }) {
 
 export async function searchMovies({ query }) {
 
+  // 🧠 1. enriquecer query (muy importante)
   const fullQuery = `
-    User is searching for movies with:
+    User is searching for movies with the following intent:
+    
     ${query}
-
-    Focus on themes, relationships, and emotional context.
+    
+    Focus on:
+    - themes
+    - emotional tone
+    - relationships
+    - character dynamics
+    
+    Return semantically similar movies.
     `;
 
   const vector = await embed(fullQuery);
 
+  // 🔎 2. traer más candidatos (para reranking)
   const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       vector,
-      limit: 5,
+      limit: 15, // 🔥 antes 5 → ahora más para rerank
       with_payload: true
     })
   });
@@ -727,8 +835,46 @@ export async function searchMovies({ query }) {
 
   if (!data.result) throw new Error(data.status?.error || 'Qdrant search failed');
 
-  return data.result.map(r => ({
-    ...r.payload,
-    ...explainScore(query, r.payload, r.score)
-  }));
+  const tokens = query.toLowerCase().split(/\s+/);
+
+  // 🧠 3. reranking híbrido
+  const reranked = data.result.map(r => {
+
+    const payload = r.payload;
+
+    let bonus = 0;
+
+    // 🎭 themes match (🔥 lo más importante)
+    if (payload.themes?.some(t =>
+      tokens.some(token => t.toLowerCase().includes(token))
+    )) {
+      bonus += 0.15;
+    }
+
+    // 🎬 genres match
+    if (payload.genres?.some(g =>
+      tokens.some(token => g.toLowerCase().includes(token))
+    )) {
+      bonus += 0.07;
+    }
+
+    // 🧠 plot match (light boost)
+    if (payload.plot &&
+      tokens.some(token => payload.plot.toLowerCase().includes(token))
+    ) {
+      bonus += 0.05;
+    }
+
+    return {
+      ...payload,
+      score: r.score,
+      final_score: r.score + bonus,
+      ...explainScore(query, payload, r.score)
+    };
+  });
+
+  // 🏆 4. ordenar por score final
+  return reranked
+    .sort((a, b) => b.final_score - a.final_score)
+    .slice(0, 5);
 }
