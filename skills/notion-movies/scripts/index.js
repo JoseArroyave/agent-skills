@@ -16,6 +16,7 @@ const NOTION_MOVIES_MODEL = process.env.NOTION_MOVIES_MODEL || 'llama3.2:3b';
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
+const DATABASE_NAME = 'Movies';
 
 const COLLECTION = 'movies';
 const VECTOR_SIZE = 768;
@@ -24,13 +25,13 @@ const VECTOR_SIZE = 768;
    🔎 DATABASE
 ========================= */
 
-async function findDatabase(query) {
+async function findDatabase() {
   const res = await notion.search({
-    query,
+    query: DATABASE_NAME,
     filter: { value: "data_source", property: "object" }
   });
 
-  if (!res.results.length) throw new Error(`Database not found: ${query}`);
+  if (!res.results.length) throw new Error(`Database not found: ${DATABASE_NAME}`);
   return res.results[0].id;
 }
 
@@ -199,8 +200,8 @@ function rerank(results, baseMovie) {
     .sort((a, b) => b.final_score - a.final_score);
 }
 
-async function findMovieInDB(title, databaseQuery) {
-  const dbId = await findDatabase(databaseQuery);
+async function findMovieInDB(title) {
+  const dbId = await findDatabase();
   const pages = await getAllPages(dbId);
 
   return pages.find(p =>
@@ -622,19 +623,19 @@ function isFuzzy(a, b) {
    🚀 MAIN ACTIONS
 ========================= */
 
-export async function recommendMovies({ title, databaseQuery }) {
+export async function recommendMovies({ title }) {
 
   // 1. buscar en Notion
-  let page = await findMovieInDB(title, databaseQuery);
+  let page = await findMovieInDB(title);
 
   // 2. si no existe → crear + enriquecer
   if (!page) {
     console.log(`Movie not found. Adding + enriching: ${title}`);
 
-    await addMovie({ title, databaseQuery });
-    await enrichMovie({ title, databaseQuery });
+    await addMovie({ title });
+    await enrichMovie({ title });
 
-    page = await findMovieInDB(title, databaseQuery);
+    page = await findMovieInDB(title);
   }
 
   const titleFromPage = getTitle(page);
@@ -672,10 +673,10 @@ export async function recommendMovies({ title, databaseQuery }) {
   return rerank(results, point.payload);
 }
 
-export async function indexAllMovies({ databaseQuery }) {
+export async function indexAllMovies() {
   console.log('🚀 Starting full indexing...\n');
 
-  const dbId = await findDatabase(databaseQuery);
+  const dbId = await findDatabase();
   const pages = await getAllPages(dbId);
 
   console.log(`📄 Found ${pages.length} movies\n`);
@@ -724,8 +725,8 @@ export async function indexAllMovies({ databaseQuery }) {
   console.log(`⚠️ Skipped: ${skipped}`);
 }
 
-export async function addMovie({ title, databaseQuery }) {
-  const dbId = await findDatabase(databaseQuery);
+export async function addMovie({ title }) {
+  const dbId = await findDatabase();
   const pages = await getAllPages(dbId);
 
   const existing = pages.find(p =>
@@ -749,9 +750,9 @@ export async function addMovie({ title, databaseQuery }) {
   return { success: true };
 }
 
-export async function enrichMovie({ title, databaseQuery }) {
+export async function enrichMovie({ title }) {
 
-  const dbId = await findDatabase(databaseQuery);
+  const dbId = await findDatabase();
   const pages = await getAllPages(dbId);
 
   const page = pages.find(p => getTitle(p) === title);

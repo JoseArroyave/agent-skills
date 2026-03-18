@@ -190,8 +190,7 @@ Creates a movie page (basic structure)
 
 ```json
 {
-  "title": "Interstellar",
-  "databaseQuery": "Movies"
+  "title": "Interstellar"
 }
 ```
 
@@ -218,8 +217,7 @@ Enriches a movie with:
 
 ```json
 {
-  "title": "Interstellar",
-  "databaseQuery": "Movies"
+  "title": "Interstellar"
 }
 ```
 
@@ -246,12 +244,6 @@ Returns:
 ## 🔁 indexAllMovies
 
 Sync Notion → Qdrant (vector DB)
-
-```json
-{
-  "databaseQuery": "Movies"
-}
-```
 
 ---
 
@@ -450,7 +442,7 @@ System prevents:
 
 Agents should:
 
-* ALWAYS use `databaseQuery`
+* ALWAYS use DATABASE_NAME
 * ALWAYS check duplicates before adding
 * prefer semantic search over filters
 * explain recommendations when possible
