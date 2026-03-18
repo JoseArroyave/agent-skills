@@ -298,8 +298,9 @@ async function ensurePlot(page, plot) {
         object: 'block',
         type: 'callout',
         callout: {
-          rich_text: [{ type: 'text', text: { content: 'Plot' } }],
-          icon: { type: 'emoji', emoji: '💡' }
+          rich_text: [{ type: 'text', text: { content: 'Plot', annotations: { italic: true } } }],
+          icon: { type: 'emoji', emoji: '💡' },
+          color: 'gray_background'
         }
       },
       {
