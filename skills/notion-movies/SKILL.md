@@ -243,24 +243,7 @@ Returns:
 
 ---
 
-## 🧬 detectDuplicate
-
-Detects duplicates using:
-
-* embeddings similarity
-* fuzzy matching
-* normalized titles
-
-```json
-{
-  "title": "Interstellar",
-  "databaseQuery": "Movies"
-}
-```
-
----
-
-## 🔁 syncDatabase
+## 🔁 indexAllMovies
 
 Sync Notion → Qdrant (vector DB)
 
@@ -269,6 +252,36 @@ Sync Notion → Qdrant (vector DB)
   "databaseQuery": "Movies"
 }
 ```
+
+---
+
+## 🧠 searchMovies (advanced behavior)
+
+Search uses enriched semantic context:
+
+* themes
+* emotional meaning
+* relationships
+* inferred intent
+
+Not just keywords.
+
+---
+
+## 🧠 recommendMovies
+
+Returns semantically similar movies based on a given title.
+
+```json
+{
+  "title": "Interstellar"
+}
+```
+
+Returns:
+
+* top similar movies
+* similarity score
 
 ---
 
