@@ -479,16 +479,21 @@ function buildText(movie) {
   return `
     Movie: ${movie.title}
 
-    Genres: ${movie.genres?.join(', ') || ''}
+    This is a ${movie.genres?.join(', ')} film
+    directed by ${movie.director}.
 
-    Director: ${movie.director || ''}
+    Plot:
+    ${movie.plot}
 
-    Plot: ${movie.plot || ''}
+    Themes:
+    ${movie.themes?.join(', ')}
 
-    Themes: ${movie.themes?.join(', ') || ''}
+    This movie explores:
+    ${movie.themes?.join(', ')}
 
-    Keywords: ${movie.genres?.join(', ') || ''}, ${movie.director || ''}
-  `.trim();
+    Keywords:
+    ${movie.genres?.join(', ')}, ${movie.director}
+      `.trim();
 }
 
 async function embed(text) {
@@ -600,7 +605,9 @@ export async function indexAllMovies({ databaseQuery }) {
       const plot = await extractPlotFromPage(page) || '';
       const director = page.properties['Director/es']?.rich_text?.[0]?.text?.content || '';
 
-      const themes = await extractThemesLLM(plot);
+      const existingThemes = page.properties['Themes']?.multi_select?.map(t => t.name) || [];
+      const themes = (!existingThemes.length) ? await extractThemesLLM(plot) : existingThemes;
+
       const payload = buildPayload({ director, genres, title, plot, page, themes });
       await upsertVector(payload);
 
@@ -678,7 +685,9 @@ export async function enrichMovie({ title, databaseQuery }) {
   await ensurePlot(page, data.plot);
   await ensureRating(page, data.rating);
 
-  const themes = await extractThemesLLM(data.plot);
+  const existingThemes = page.properties['Themes']?.multi_select?.map(t => t.name) || [];
+  const themes = (!existingThemes.length) ? await extractThemesLLM(data.plot) : existingThemes;
+
   const payload = buildPayload({
     director: data.director,
     genres: data.genres,
@@ -687,6 +696,7 @@ export async function enrichMovie({ title, databaseQuery }) {
     title,
     page
   });
+
   await upsertVector(payload);
 
   return { success: true };
