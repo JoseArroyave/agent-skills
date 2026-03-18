@@ -75,7 +75,18 @@ async function getMovieData(title) {
     return { error: 'NOT_FOUND' };
   }
 
-  if (search.results.length > 1) {
+  const scored = search.results.map(movie => ({
+    score: scoreMovie(title, movie),
+    movie
+  }));
+
+  // ordenar por score descendente
+  scored.sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+
+  // 🧠 threshold inteligente
+  if (best.score < 0.75) {
     return {
       error: 'AMBIGUOUS',
       options: search.results.slice(0, 5).map(m => ({
@@ -85,7 +96,7 @@ async function getMovieData(title) {
     };
   }
 
-  const movie = search.results[0];
+  const movie = best.movie;
 
   const details = await fetchJson(
     `https://api.themoviedb.org/3/movie/${movie.id}?api_key=${TMDB_API_KEY}`
@@ -140,8 +151,36 @@ function hasGenres(page) {
   return page.properties['Género']?.multi_select?.length > 0;
 }
 
+function hasActors(page) {
+  return page.properties['Actores']?.multi_select?.length > 0;
+}
+
 function hasEmoji(page) {
   return page.icon?.type === 'emoji';
+}
+
+function scoreMovie(query, movie) {
+  const normalizedQuery = query.toLowerCase();
+  const normalizedTitle = movie.title.toLowerCase();
+
+  // 1. Similaridad (0 → mejor)
+  const distance = levenshtein.get(normalizedQuery, normalizedTitle);
+
+  // Normalizamos (más bajo = mejor → invertimos)
+  const similarityScore = 1 - (distance / Math.max(normalizedQuery.length, normalizedTitle.length));
+
+  // 2. Popularidad (0 → 1)
+  const popularityScore = Math.min(movie.popularity / 100, 1);
+
+  // 3. Bonus si el título contiene exactamente el query
+  const exactMatchBonus = normalizedTitle.includes(normalizedQuery) ? 0.2 : 0;
+
+  // 🔥 Score final ponderado
+  return (
+    similarityScore * 0.7 +
+    popularityScore * 0.2 +
+    exactMatchBonus
+  );
 }
 
 /* =========================
@@ -160,13 +199,13 @@ async function ensureYear(page, year) {
 }
 
 async function ensureActors(page, actors) {
-  if (!actors?.length) return;
+  if (hasActors(page) || !actors.length) return;
 
   await notion.pages.update({
     page_id: page.id,
     properties: {
       'Actores': {
-        rich_text: [{ text: { content: actors.join(', ') } }]
+        multi_select: actors.map(a => ({ name: a }))
       }
     }
   });
@@ -271,6 +310,17 @@ async function ensurePlot(page, plot) {
         }
       }
     ]
+  });
+}
+
+async function ensureRating(page, rating) {
+  const name = rating || 'Sin calificar';
+
+  await notion.pages.update({
+    page_id: page.id,
+    properties: {
+      Rating: { select: { name } }
+    }
   });
 }
 
@@ -388,7 +438,6 @@ export async function addMovie({ title, databaseQuery }) {
 
 export async function enrichMovie({ title, databaseQuery }) {
 
-
   const dbId = await findDatabase(databaseQuery);
   const pages = await getAllPages(dbId);
 
@@ -420,13 +469,14 @@ export async function enrichMovie({ title, databaseQuery }) {
   await ensurePortada(page, title, data.poster);
   await ensureCover(page, data.poster);
   await ensurePlot(page, data.plot);
+  await ensureRating(page, data.rating);
 
   await upsertVector({
-    notionPageId: page.id,
-    title,
-    genres: data.genres,
     director: data.director,
-    plot: data.plot
+    notionPageId: page.id,
+    genres: data.genres,
+    plot: data.plot,
+    title
   });
 
   return { success: true };
