@@ -11,12 +11,12 @@ dotenv.config({ path: '/home/jose/.openclaw/.env' });
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'nomic-embed-text:v1.5';
 const NOTION_MOVIES_MODEL = process.env.NOTION_MOVIES_MODEL || 'llama3.2:3b';
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-const EMBEDDING_MODEL = 'nomic-embed-text:v1.5';
 const COLLECTION = 'movies';
 const VECTOR_SIZE = 768;
 
