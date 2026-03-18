@@ -11,9 +11,10 @@ dotenv.config({ path: '/home/jose/.openclaw/.env' });
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
-const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const NOTION_MOVIES_MODEL = process.env.NOTION_MOVIES_MODEL || 'llama3.2:3b';
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
+const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 const EMBEDDING_MODEL = 'nomic-embed-text:v1.5';
 const COLLECTION = 'movies';
@@ -227,12 +228,85 @@ function explainScore(query, payload, score) {
     reasons.push('plot similarity');
   }
 
+  if (payload.themes?.some(t =>
+    tokens.some(token => t.includes(token))
+  )) {
+    reasons.push('theme similarity');
+  }
+
   return {
     score: Number(score.toFixed(3)),
     explanation: reasons.length
       ? `Similar because: ${reasons.join(', ')}`
       : 'General semantic similarity'
   };
+}
+
+function buildPayload({ title, genres, director, plot, page, themes }) {
+  return {
+    text: `${title}. ${genres.join(', ')}. ${director}. ${plot}`,
+    genre_text: genres.join(', '),
+    title: cleanTitle(title),
+    notionPageId: page.id,
+    has_plot: !!plot,
+    director,
+    genres,
+    themes,
+    plot
+  };
+}
+
+function safeParseThemes(text) {
+  try {
+    const json = JSON.parse(text);
+    return Array.isArray(json) ? json : [];
+  } catch {
+    const match = text.match(/\[(.*?)\]/);
+    if (!match) return [];
+
+    return match[1]
+      .split(',')
+      .map(t => t.replace(/["']/g, '').trim())
+      .filter(Boolean);
+  }
+}
+
+async function extractThemesLLM(plot) {
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: NOTION_MOVIES_MODEL,
+        prompt: `
+          Extract 3 to 5 high-level themes from this movie plot.
+
+          Rules:
+          - Return ONLY a JSON array
+          - No explanation
+          - Use short phrases
+          - Lowercase
+
+          Plot:
+          ${plot}`,
+        stream: false
+      })
+    });
+
+    const json = await res.json();
+
+    // 👇 respuesta viene como string
+    const text = json.response?.trim();
+
+    // intentar parsear JSON
+    const themes = safeParseThemes(text);
+
+    return Array.isArray(themes) ? themes : [];
+
+  } catch (e) {
+    console.error('LLM theme extraction failed:', e);
+    return [];
+  }
 }
 
 /* =========================
@@ -401,20 +475,6 @@ async function ensureRating(page, rating) {
    🧠 EMBEDDINGS
 ========================= */
 
-function inferThemes(movie) {
-  const text = (movie.plot || '').toLowerCase();
-
-  const themes = [];
-
-  if (text.includes('space')) themes.push('space');
-  if (text.includes('time')) themes.push('time');
-  if (text.includes('love')) themes.push('romance');
-  if (text.includes('war')) themes.push('war');
-  if (text.includes('future')) themes.push('futuristic');
-
-  return themes.join(', ');
-}
-
 function buildText(movie) {
   return `
     Movie: ${movie.title}
@@ -425,8 +485,10 @@ function buildText(movie) {
 
     Plot: ${movie.plot || ''}
 
+    Themes: ${movie.themes?.join(', ') || ''}
+
     Keywords: ${movie.genres?.join(', ') || ''}, ${movie.director || ''}
-    `.trim();
+  `.trim();
 }
 
 async function embed(text) {
@@ -463,8 +525,8 @@ async function upsertVector(movie) {
       points: [
         {
           id: movie.notionPageId,
-          vector,
-          payload: movie
+          payload: movie,
+          vector
         }
       ]
     })
@@ -538,17 +600,8 @@ export async function indexAllMovies({ databaseQuery }) {
       const plot = await extractPlotFromPage(page) || '';
       const director = page.properties['Director/es']?.rich_text?.[0]?.text?.content || '';
 
-      const payload = {
-        text: `${title}. ${genres.join(', ')}. ${director}. ${plot}`,
-        genre_text: genres.join(', '),
-        title: cleanTitle(title),
-        notionPageId: page.id,
-        has_plot: !!plot,
-        director,
-        genres,
-        plot
-      };
-
+      const themes = await extractThemesLLM(plot);
+      const payload = buildPayload({ director, genres, title, plot, page, themes });
       await upsertVector(payload);
 
       indexed++;
@@ -625,13 +678,16 @@ export async function enrichMovie({ title, databaseQuery }) {
   await ensurePlot(page, data.plot);
   await ensureRating(page, data.rating);
 
-  await upsertVector({
+  const themes = await extractThemesLLM(data.plot);
+  const payload = buildPayload({
     director: data.director,
-    notionPageId: page.id,
     genres: data.genres,
     plot: data.plot,
-    title
+    themes,
+    title,
+    page
   });
+  await upsertVector(payload);
 
   return { success: true };
 }
