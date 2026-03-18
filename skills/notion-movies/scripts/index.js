@@ -454,7 +454,7 @@ function isFuzzy(a, b) {
 ========================= */
 
 export async function recommendMovies({ title }) {
-  const vector = await embed(title);
+  const vector = await embed(`Movie: ${title}`);
 
   const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
     method: 'POST',
@@ -468,7 +468,12 @@ export async function recommendMovies({ title }) {
 
   const data = await res.json();
 
-  return data.result.map(r => r.payload);
+  if (!data.result) throw new Error(data.status?.error || 'Qdrant failed');
+
+  return data.result.map(r => ({
+    ...r.payload,
+    score: r.score
+  }));
 }
 
 export async function indexAllMovies({ databaseQuery }) {
@@ -632,7 +637,15 @@ function explainScore(query, payload, score) {
 }
 
 export async function searchMovies({ query }) {
-  const vector = await embed(movie.text || buildText(movie));
+
+  const fullQuery = `
+    User is searching for movies with:
+    ${query}
+
+    Focus on themes, relationships, and emotional context.
+    `;
+
+  const vector = await embed(fullQuery);
 
   const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
     method: 'POST',
