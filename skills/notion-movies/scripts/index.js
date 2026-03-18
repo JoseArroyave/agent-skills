@@ -159,6 +159,28 @@ function hasEmoji(page) {
   return page.icon?.type === 'emoji';
 }
 
+function cleanTitle(title) {
+  return title
+    .replace(/^\(/, '')        // (500 → 500
+    .replace(/\)/g, '')        // quitar )
+    .replace(/\(\d{4}\)/, '')  // (2010)
+    .trim();
+}
+
+async function existsInQdrant(id) {
+  const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/${id}`);
+  const data = await res.json();
+  return !!data.result;
+}
+
+async function extractPlotFromPage(page) {
+  const blocks = await notion.blocks.children.list({
+    block_id: page.id
+  });
+  const quoteBlock = blocks.results.find(b => b.type === 'quote');
+  return quoteBlock?.quote?.rich_text?.[0]?.text?.content || '';
+}
+
 function scoreMovie(query, movie) {
   const normalizedQuery = query.toLowerCase();
   const normalizedTitle = movie.title.toLowerCase();
@@ -184,8 +206,28 @@ function scoreMovie(query, movie) {
 }
 
 /* =========================
-   🖼️ ENRICH FUNCTIONS
+🖼️ ENRICH FUNCTIONS
 ========================= */
+
+async function ensureCollection() {
+  const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}`);
+  const data = await res.json();
+
+  if (data.status.error && data.status.error === "Not found: Collection `movies` doesn't exist!") {
+    console.log('⚠️ Creating collection...');
+
+    await fetch(`${QDRANT_URL}/collections/${COLLECTION}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        vectors: {
+          size: VECTOR_SIZE,
+          distance: 'Cosine'
+        }
+      })
+    });
+  }
+}
 
 async function ensureYear(page, year) {
   if (!year) return;
@@ -298,7 +340,7 @@ async function ensurePlot(page, plot) {
         object: 'block',
         type: 'callout',
         callout: {
-          rich_text: [{ type: 'text', text: { content: 'Plot', annotations: { italic: true } } }],
+          rich_text: [{ annotations: { italic: true }, text: { content: 'Plot' }, type: 'text' }],
           icon: { type: 'emoji', emoji: '💡' },
           color: 'gray_background'
         }
@@ -345,19 +387,16 @@ function inferThemes(movie) {
 
 function buildText(movie) {
   return `
-Title: ${movie.title}
-Title: ${movie.title}
+    Movie: ${movie.title}
 
-Genres: ${movie.genres?.join(', ') || ''}
-Genres: ${movie.genres?.join(', ') || ''}
+    Genres: ${movie.genres?.join(', ') || ''}
 
-Director: ${movie.director || ''}
+    Director: ${movie.director || ''}
 
-Plot: ${movie.plot || ''}
+    Plot: ${movie.plot || ''}
 
-Themes: ${inferThemes(movie)}
-Themes: ${inferThemes(movie)}
-`.trim();
+    Keywords: ${movie.genres?.join(', ') || ''}, ${movie.director || ''}
+    `.trim();
 }
 
 async function embed(text) {
@@ -383,6 +422,8 @@ async function embed(text) {
 ========================= */
 
 async function upsertVector(movie) {
+  await ensureCollection();
+
   const vector = await embed(buildText(movie));
 
   await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points`, {
@@ -411,6 +452,83 @@ function isFuzzy(a, b) {
 /* =========================
    🚀 MAIN ACTIONS
 ========================= */
+
+export async function recommendMovies({ title }) {
+  const vector = await embed(title);
+
+  const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      vector,
+      limit: 5,
+      with_payload: true
+    })
+  });
+
+  const data = await res.json();
+
+  return data.result.map(r => r.payload);
+}
+
+export async function indexAllMovies({ databaseQuery }) {
+  console.log('🚀 Starting full indexing...\n');
+
+  const dbId = await findDatabase(databaseQuery);
+  const pages = await getAllPages(dbId);
+
+  console.log(`📄 Found ${pages.length} movies\n`);
+
+  let indexed = 0;
+  let skipped = 0;
+
+  for (const page of pages) {
+    try {
+
+      const title = getTitle(page);
+
+      if (!title) {
+        skipped++;
+        continue;
+      }
+
+      if (await existsInQdrant(page.id)) {
+        console.log(`⏭️ Already indexed: ${title}`);
+        continue;
+      }
+
+      console.log(`🎬 Processing: ${title}`);
+
+      const genres = page.properties['Género']?.multi_select?.map(g => g.name) || [];
+      const plot = await extractPlotFromPage(page) || '';
+      const director = page.properties['Director/es']?.rich_text?.[0]?.text?.content || '';
+
+      const payload = {
+        text: `${title}. ${genres.join(', ')}. ${director}. ${plot}`,
+        genre_text: genres.join(', '),
+        title: cleanTitle(title),
+        notionPageId: page.id,
+        has_plot: !!plot,
+        director,
+        genres,
+        plot
+      };
+
+      await upsertVector(payload);
+
+      indexed++;
+      console.log(`✅ Indexed: ${title}\n`);
+
+    } catch (e) {
+      console.log(`❌ Error with ${getTitle(page)}: ${e.message}\n`);
+      skipped++;
+    }
+  }
+
+  console.log('\n🎉 DONE');
+  console.log(`✅ Indexed: ${indexed}`);
+  console.log(`⚠️ Skipped: ${skipped}`);
+}
 
 export async function addMovie({ title, databaseQuery }) {
   const dbId = await findDatabase(databaseQuery);
@@ -514,7 +632,7 @@ function explainScore(query, payload, score) {
 }
 
 export async function searchMovies({ query }) {
-  const vector = await embed(query);
+  const vector = await embed(movie.text || buildText(movie));
 
   const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/search`, {
     method: 'POST',
@@ -527,6 +645,8 @@ export async function searchMovies({ query }) {
   });
 
   const data = await res.json();
+
+  if (!data.result) throw new Error(data.status?.error || 'Qdrant search failed');
 
   return data.result.map(r => ({
     ...r.payload,
