@@ -1,0 +1,16 @@
+{
+  "name": "notion-movies-skill",
+  "version": "1.0.0",
+  "description": "Notion Movies automation scripts",
+  "type": "module",
+  "main": "scripts/index.js",
+  "scripts": {
+    "start": "node scripts/index.js",
+    "find-db": "node scripts/index.js --find-db"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.14",
+    "dotenv": "^16.4.5",
+    "fast-levenshtein": "^3.0.0"
+  }
+}
