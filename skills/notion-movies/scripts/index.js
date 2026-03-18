@@ -205,6 +205,36 @@ function scoreMovie(query, movie) {
   );
 }
 
+function explainScore(query, payload, score) {
+  const reasons = [];
+  const q = query.toLowerCase();
+
+  const tokens = q.split(/\s+/);
+
+  if (payload.genres?.some(g =>
+    tokens.some(t => g.toLowerCase().includes(t))
+  )) {
+    reasons.push('genre similarity');
+  }
+
+  if (payload.director &&
+    tokens.some(t => payload.director.toLowerCase().includes(t))) {
+    reasons.push('director match');
+  }
+
+  if (payload.plot &&
+    tokens.some(t => payload.plot.toLowerCase().includes(t))) {
+    reasons.push('plot similarity');
+  }
+
+  return {
+    score: Number(score.toFixed(3)),
+    explanation: reasons.length
+      ? `Similar because: ${reasons.join(', ')}`
+      : 'General semantic similarity'
+  };
+}
+
 /* =========================
 🖼️ ENRICH FUNCTIONS
 ========================= */
@@ -604,36 +634,6 @@ export async function enrichMovie({ title, databaseQuery }) {
   });
 
   return { success: true };
-}
-
-function explainScore(query, payload, score) {
-  const reasons = [];
-  const q = query.toLowerCase();
-
-  const tokens = q.split(/\s+/);
-
-  if (payload.genres?.some(g =>
-    tokens.some(t => g.toLowerCase().includes(t))
-  )) {
-    reasons.push('genre similarity');
-  }
-
-  if (payload.director &&
-    tokens.some(t => payload.director.toLowerCase().includes(t))) {
-    reasons.push('director match');
-  }
-
-  if (payload.plot &&
-    tokens.some(t => payload.plot.toLowerCase().includes(t))) {
-    reasons.push('plot similarity');
-  }
-
-  return {
-    score: Number(score.toFixed(3)),
-    explanation: reasons.length
-      ? `Similar because: ${reasons.join(', ')}`
-      : 'General semantic similarity'
-  };
 }
 
 export async function searchMovies({ query }) {
