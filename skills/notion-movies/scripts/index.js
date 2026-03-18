@@ -183,14 +183,12 @@ function rerank(results, baseMovie) {
     let bonus = 0;
 
     // 🎭 themes overlap
-    if (r.themes?.some(t => baseMovie.themes?.includes(t))) {
-      bonus += 0.1;
-    }
+    const themesMatch = r.themes?.some(t => baseMovie.themes?.includes(t));
+    if (themesMatch) bonus += 0.1;
 
     // 🎬 mismo género
-    if (r.genres?.some(g => baseMovie.genres?.includes(g))) {
-      bonus += 0.05;
-    }
+    const genreMatch = r.genres?.some(g => baseMovie.genres?.includes(g));
+    if (genreMatch) bonus += 0.05;
 
     return {
       ...r,
@@ -774,29 +772,23 @@ export async function enrichMovie({ title }) {
     };
   }
 
+  const { director, runtime, rating, genres, actors, poster, year, plot } = data;
+
   await ensureEmoji(page);
-  await ensureDirector(page, data.director);
-  await ensureGenres(page, data.genres);
-  await ensureYear(page, data.year);
-  await ensureActors(page, data.actors);
-  await ensureRuntime(page, data.runtime);
-  await ensurePortada(page, title, data.poster);
-  await ensureCover(page, data.poster);
-  await ensurePlot(page, data.plot);
-  await ensureRating(page, data.rating);
+  await ensureDirector(page, director);
+  await ensureGenres(page, genres);
+  await ensureYear(page, year);
+  await ensureActors(page, actors);
+  await ensureRuntime(page, runtime);
+  await ensurePortada(page, title, poster);
+  await ensureCover(page, poster);
+  await ensurePlot(page, plot);
+  await ensureRating(page, rating);
 
   const existingThemes = getThemes(page);
-  const themes = (!existingThemes.length) ? await extractThemesLLM(data.plot) : existingThemes;
+  const themes = (!existingThemes.length) ? await extractThemesLLM(plot) : existingThemes;
 
-  const payload = buildPayload({
-    director: data.director,
-    genres: data.genres,
-    plot: data.plot,
-    themes,
-    title,
-    page
-  });
-
+  const payload = buildPayload({ director, themes, genres, title, plot, page });
   await upsertVector(payload);
 
   return { success: true };
@@ -842,29 +834,19 @@ export async function searchMovies({ query }) {
   const reranked = data.result.map(r => {
 
     const payload = r.payload;
-
     let bonus = 0;
 
     // 🎭 themes match (🔥 lo más importante)
-    if (payload.themes?.some(t =>
-      tokens.some(token => t.toLowerCase().includes(token))
-    )) {
-      bonus += 0.15;
-    }
+    const themesMatch = payload.themes?.some(t => tokens.some(token => t.toLowerCase().includes(token)));
+    if (themesMatch) bonus += 0.15;
 
     // 🎬 genres match
-    if (payload.genres?.some(g =>
-      tokens.some(token => g.toLowerCase().includes(token))
-    )) {
-      bonus += 0.07;
-    }
+    const bonusMatch = payload.genres?.some(g => tokens.some(token => g.toLowerCase().includes(token)));
+    if (bonusMatch) bonus += 0.07;
 
     // 🧠 plot match (light boost)
-    if (payload.plot &&
-      tokens.some(token => payload.plot.toLowerCase().includes(token))
-    ) {
-      bonus += 0.05;
-    }
+    const plotMatch = payload.plot && tokens.some(t => payload.plot.toLowerCase().includes(t));
+    if (plotMatch) bonus += 0.05;
 
     return {
       ...payload,
