@@ -9,8 +9,8 @@
     "find-db": "node scripts/index.js --find-db"
   },
   "dependencies": {
-    "@notionhq/client": "^2.2.14",
-    "dotenv": "^16.4.5",
-    "fast-levenshtein": "^3.0.0"
+    "@notionhq/client": "^5.13.0",
+    "fast-levenshtein": "^3.0.0",
+    "dotenv": "^16.4.5"
   }
 }
