@@ -1516,4 +1516,4 @@ usarlos para todos los cálculos posibles antes de hacer nuevas llamadas.
 ---
 
 ## Guardado de datos
-Guarda porfa ese análisis en un txt en ./claude/skills/football-analysis-engine/football-analysis. Crea una carpeta cuyo nombre corresponda con el nombre de la competición, por ejemplo, Champions League 25-26. Guarda el archivo como EQUIPOLOCAL_EQUIPOVISITANTE_DD_MM_AAAA(JORNADA_X).txt donde X en (JORNADA_X) es el # de la jornada que se juega o si es 1/4 de final u 1/8 lo que corresponda
+Guarda porfa ese análisis en un txt en ./claude/skills/football-betting-analysis/football-analysis. Crea una carpeta cuyo nombre corresponda con el nombre de la competición, por ejemplo, Champions League 25-26. Guarda el archivo como EQUIPOLOCAL_EQUIPOVISITANTE_DD_MM_AAAA(JORNADA_X).txt donde X en (JORNADA_X) es el # de la jornada que se juega o si es 1/4 de final u 1/8 lo que corresponda

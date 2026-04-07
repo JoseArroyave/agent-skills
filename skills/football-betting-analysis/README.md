@@ -39,7 +39,7 @@ This MCP provides all the endpoints documented in SKILL.md.
 ```
 User
 → Agent
-→ football-analysis-engine skill
+→ football-betting-analysis skill
     ├── Phase 1: Identification (match ID, date/time)
     ├── Phase 2: Match Data (score, stats, events, highlights)
     ├── Phase 3: Global Team Data (squad, top players)
@@ -104,7 +104,7 @@ User
 ## Installation
 
 ```bash
-npx skills add JoseArroyave/agent-skills --skill football-analysis-engine
+npx skills add JoseArroyave/agent-skills --skill football-betting-analysis
 ```
 
 ---
@@ -171,7 +171,7 @@ The analysis follows this structure:
 Analyses are saved to:
 
 ```
-./claude/skills/football-analysis-engine/football-analysis/
+./claude/skills/football-betting-analysis/football-analysis/
 ```
 
 Folder structure by competition:
