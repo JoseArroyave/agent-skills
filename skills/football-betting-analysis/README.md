@@ -171,7 +171,7 @@ The analysis follows this structure:
 Analyses are saved to:
 
 ```
-./claude/skills/football-analysis-engine/Análisis deportivos/
+./claude/skills/football-analysis-engine/football-analysis/
 ```
 
 Folder structure by competition:
