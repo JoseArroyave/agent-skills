@@ -16,4 +16,5 @@ A personal collection of skills for AI agents. Feel free to use.
 
 - [**notion-movies**](https://github.com/JoseArroyave/agent-skills/tree/main/skills/notion-movies): A Notion-based movie management and semantic search skill. It allows agents to add and enrich movies using TMDB (poster, plot, director, genres), prevent duplicates using semantic + fuzzy matching, and perform embedding-based search using Ollama and Qdrant.
 
-- [**football-analysis-engine**](https://github.com/JoseArroyave/agent-skills/tree/main/skills/football-analysis-engine): Quantitative football analysis engine based on RapidAPI Hub - Free API Live Football Data. Provides descriptive analysis, quantitative predictions with confidence levels, pattern and correlation detection, rolling window form evaluation, and statistical recommendations for matches and players.
+- [**football-betting-analysis**](https://github.com/JoseArroyave/agent-skills/tree/main/skills/football-betting-analysis): Quantitative football betting analysis based on RapidAPI Hub - Free API Live Football Data. Provides descriptive analysis, quantitative predictions with confidence levels, pattern and correlation detection, rolling window form evaluation, and statistical recommendations for matches and players.
+
