@@ -1,197 +1,259 @@
-# football-betting-analysis
+# Football Betting Analysis
 
-Quantitative football betting analysis based on RapidAPI Hub - Free API Live Football Data.
-
-This skill produces analysis based on pure statistical data, crossing domestic league, national cups, European competitions, and individual player form to build a rigorous evaluation of each team and match.
-
----
+Pre-match football analysis in 8 layers. Receives a natural language query, discovers the match via the Bzzoiro API, gathers data, and produces a structured report with probabilistic language.
 
 ## System Requirements
 
-### Required Services
+This skill is an AI agent workflow and requires:
 
-- **RapidAPI Hub — Free API Live Football Data** — available as an MCP server for easier integration:
+### Required Access
 
-```json
-"RapidAPI Hub - Free API Live Football Data": {
-  "command": "npx",
-  "args": [
-    "mcp-remote",
-    "https://mcp.rapidapi.com",
-    "--header",
-    "x-api-host: free-api-live-football-data.p.rapidapi.com",
-    "--header",
-    "x-api-key: <api_key>"
-  ]
-}
+- **Bzzoiro API** (`https://sports.bzzoiro.com`)
+- **API Token** — stored in environment variable `BZzoiro_TOKEN`
+
+### Environment Setup
+
+```bash
+export BZzoiro_TOKEN="your_bzzoiro_api_token"
 ```
-
-This MCP provides all the endpoints documented in SKILL.md.
-
-### Rate Limiting
-
-- **1000 requests/hour** — the skill plans calls efficiently by priority
-
----
 
 ## Architecture
 
 ```
-User
-→ Agent
-→ football-betting-analysis skill
-    ├── Phase 1: Identification (match ID, date/time)
-    ├── Phase 2: Match Data (score, stats, events, highlights)
-    ├── Phase 3: Global Team Data (squad, top players)
-    ├── Phase 4: Standings and League Position
-    ├── Phase 5: Additional Competitions
-    ├── Phase 6: Recent Form and News
-    └── Phase 7: Transfers and Physical Form
-    ↓
-Agent receives structured analysis (Layers 1-6)
-↓
-User
+User (natural language query)
+    │
+    ▼
+Agent parses query
+    │
+    ▼
+Phase 1: Match Discovery
+    GET /api/events/?date_from=X&date_to=Y[&league=Z]
+    │
+    ▼
+Phase 2: Data Gathering
+    ├── GET /api/events/{id}/          → event + odds + form + H2H
+    ├── GET /api/predictions/?date_from=X&date_to=Y&league=Z
+    └── GET /api/player-stats/?event={id}
+    │
+    ▼
+8-Layer Analysis Pipeline
+    ├── Layer 1 — Base Context (odds, ML)
+    ├── Layer 2 — Team Descriptive (form, H2H)
+    ├── Layer 3 — Player Descriptive (impact metrics)
+    ├── Layer 4 — Composite Indicators (gaps, risks)
+    ├── Layer 5 — Diagnostic (trends, contradictions)
+    ├── Layer 6 — Signal Weighting (strong/moderate/weak)
+    ├── Layer 7 — Predictive (probabilities, scoreline)
+    └── Layer 8 — Prescriptive (best-supported markets)
+    │
+    ▼
+Structured Report + Confidence Level
+    │
+    ▼
+Saved to ./claude/skills/football-betting-analysis/<league>/<file>.txt
 ```
-
----
 
 ## Core Behavior
 
-- **Global Analysis**: Never limits analysis to a single competition. Crosses league + cup + Europe.
-- **Fast Mode** (~25 API calls): For direct day-of queries.
-- **Deep Mode** (~80 API calls): For complete analysis of Champions, finals, Derbies.
-- **Data Tagged by Confidence**: [API] (direct), [DER] (derived), [INF-M] (medium confidence inference), [INF-B] (low confidence inference), [N/A] (not available).
-- **Prediction with Explicit Confidence**: HIGH / MEDIUM / LOW / VERY LOW based on sample size.
+- The skill only analyzes **pre-match** events (`status = notstarted`).
+- If a match is `inprogress` or `finished`, the skill declines with a user message.
+- **No external data sources** — only the Bzzoiro API is used.
+- No invented data. Missing data is marked `[N/A]` with a brief explanation.
+- Probabilistic language only: "could", "signal", "suggests". Never: "will win", "it's certain", "over 2.5 is guaranteed".
 
----
+## When To Use
 
-## Capabilities
+Use this skill when:
 
-### Descriptive Analysis
+- The user requests analysis of a specific football match
+- The query includes teams, date, and optionally the competition
+- Pre-match context, form, players, ML predictions, and recommendations are needed
+- The match has not started yet
 
-- Recent form by rolling windows (3, 5, 10 matches)
-- Performance by competition (league, cup, Europe)
-- Home vs Away performance
-- vs Top-10 performance
+## When NOT To Use
 
-### Pattern Detection
+Do not use this skill when:
 
-- Active streaks (wins, Over 2.5, BTTS, clean sheets)
-- Sample bias identification
-- Instability signals
-
-### Statistical Recommendations
-
-- Over/Under 1.5, 2.5, 3.5 goals
-- Both Teams To Score (BTTS)
-- Home and Away Clean Sheet
-- 1X2 Result
-- Corners and Cards
-- Player recommendations (goals, assists)
-
-### Data Taxonomy
-
-| Symbol | Type | Definition |
-|---------|------|------------|
-| `[API]` | Direct data | Literal endpoint response |
-| `[DER]` | Derived data | Calculated from [API] (sum, division, average) |
-| `[INF-M]` | Medium confidence inference | Estimated with ±15% margin |
-| `[INF-B]` | Low confidence inference | Estimated with ±30% margin or higher |
-| `[N/A]` | Not available | API does not provide this data |
-
----
+- The match status is `inprogress` or `finished` → respond: "That match already started/finished. Wait for an upcoming one."
+- The query is about a tournament or team without a specific match → not applicable. Offer to search for upcoming matches of that team.
+- The user asks for in-play analysis → this skill is pre-match only.
 
 ## Installation
+
+From the root repository:
 
 ```bash
 npx skills add JoseArroyave/agent-skills --skill football-betting-analysis
 ```
 
----
+## Usage (Agent Invocation)
 
-## Usage (Agent)
+The skill is invoked automatically when the user requests pre-match football analysis. The agent:
 
-The skill activates automatically when keywords are detected such as:
+1. Parses the natural language query into structured fields
+2. Discovers the match via the Bzzoiro API
+3. Gathers all available data (event, odds, form, predictions, player stats)
+4. Runs the 8-layer analysis pipeline
+5. Produces a structured report with confidence level
+6. Saves the analysis to disk
+
+## Input (Natural Language Query Examples)
 
 ```
-match, Champions, League, form, current form, team statistics,
-H2H, head-to-head, background, over/under, both teams score, BTTS,
-corners, cards, clean sheet, streak, trend, quantitative analysis,
-prediction, home/away performance, scorers, assists, xG inferred,
-recent form, rolling window, correlation, outlier, pattern analysis
+"Analyze Barcelona vs Real Madrid for this weekend"
+"What do you think about Atletico vs Sevilla on Friday?"
+"Lens vs PSG — any good markets?"
+"Leverkusen next match"
 ```
 
----
+### Query Parsing
 
-## Input
+| Field | Description |
+|-------|-------------|
+| `home_team` | First team mentioned |
+| `away_team` | Second team mentioned (or null if only one) |
+| `date_from` | Start of date range (ISO 8601) |
+| `date_to` | End of date range (ISO 8601) |
+| `league` | Competition mentioned (or null) |
 
-### Activation by Query
+**Date shortcuts:**
+- "hoy" / "today" → date_from = today, date_to = today
+- "mañana" / "tomorrow" → date_from = tomorrow, date_to = tomorrow
+- "este finde" / "this weekend" → date_from = friday, date_to = sunday
+- "esta semana" / "this week" → date_from = monday, date_to = sunday
 
-The skill responds to queries like:
+## API Endpoints Used
 
-- "analyze tomorrow's match"
-- "how is Real Madrid coming in"
-- "Barcelona vs Bayern prediction"
-- "Liverpool's current home form"
-- "H2H between these teams"
+```
+GET /api/events/?date_from=X&date_to=Y[&league=Z]  → match discovery
+GET /api/events/{id}/                              → event + odds + form + H2H
+GET /api/predictions/?date_from=X&date_to=Y&league=Z → ML prediction lookup
+GET /api/player-stats/?event={id}                  → player statistics
+GET /api/teams/{id}/                               → team metadata
+GET /api/leagues/                                  → competition list
+```
 
----
+### What Does NOT Exist in the Bzzoiro API
+
+| Non-existent endpoint | Consequence |
+|---|---|
+| `GET /api/events/?team=X` | No direct "last 10 matches of Barcelona" query. Form comes embedded in the event object. |
+| `GET /api/predictions/{event_id}/` | Prediction ID ≠ event ID. Must search by embedded `event.id`. |
+| Corners endpoint | Not provided. Do not mention. |
+| Pre-match lineups | `lineups` is `null` pre-match. Do not use. |
+| Injury history | Not available. Do not invent. |
+
+## Source Tags
+
+Every data point in the analysis is tagged with its source:
+
+| Tag | Meaning |
+|-----|---------|
+| `[API]` | Direct from a Bzzoiro API endpoint |
+| `[ML]` | From the ML prediction model (`/api/predictions/`) |
+| `[ODDS]` | Calculated from market odds |
+| `[IND]` | Composite indicator calculated from API data |
+| `[N/A]` | Not available in the API |
+
+## The 8 Layers
+
+### Layer 1 — Base Context
+Market odds → implied probabilities. ML prediction (if available). Do they agree?
+
+### Layer 2 — Team Descriptive
+Recent form (W/D/L), points, goals scored/conceded, xG, Over 2.5/BTTS frequency. Home/away split. H2H history.
+
+### Layer 3 — Player Descriptive
+Top 3 attackers per team by offensive impact. Creation and defense metrics. Disciplinary risk. Over-reliance on a single player.
+
+### Layer 4 — Composite Indicators
+Offensive advantage, defensive fragility, form gap, home/away gap, Over/BTTS risk, volatility, discipline index, market-model coherence.
+
+### Layer 5 — Diagnostic
+Are results backed by xG? Is defense conceding by merit or weak opponents? Is Over 2.5 from volume or defensive chaos? Sustainable trend or noise?
+
+### Layer 6 — Signal Weighting
+Classifies all signals as **strong** (xG, consistency N≥5, market-ML alignment), **moderate** (N=3-4, H2H), or **weak** (N<3, contradictions).
+
+### Layer 7 — Predictive
+Combined probabilities from ML + indicators. Expected goals per team. Most likely scoreline. Match type (closed/open/defensive/competitive). Confidence level.
+
+### Layer 8 — Prescriptive
+Top 3-5 strongest signals. 2-3 alerts. Markets with multi-layer support. Markets without support (briefly explained).
+
+## Confidence Levels
+
+| Data available | Maximum confidence |
+|---|---|
+| Event + odds + ML + player-stats + form | **High** |
+| Event + odds + ML (no player-stats) | **Medium-high** |
+| Event + ML (no odds) | **Medium** |
+| Event + odds (no ML) | **Medium** |
+| Event only | **Low** |
+| No event | **Analysis not viable** |
 
 ## Output Format
 
-The analysis follows this structure:
+```
+# [Home] vs [Away] — [Competition] ([Date])
 
-1. Global Form — Home Team
-2. Global Form — Away Team
-3. Head-to-Head
-4. Quantitative Prediction
-5. Statistical Insights
-6. Recommendations
-7. Quick Guide — Data Reuse
+## 1. Context
+[...]
+
+## 2. What's Been Happening
+[...]
+
+## 3. Protagonists
+[...]
+
+## 4. Composite Indicators
+[...]
+
+## 5. Why It's Happening
+[...]
+
+## 6. Which Signals Weigh More
+[...]
+
+## 7. What Could Happen
+[...]
+
+## 8. What to Read With Best Support
+[...]
 
 ---
-
-## Skill Principles
-
-1. **Global before specific**: Always cross league + cup + Europe
-2. **Data, not opinion**: Every claim backed by data
-3. **Explicit confidence**: Every prediction includes its confidence level
-4. **Rate limiting respected**: Prioritize calls if approaching the limit
-5. **Outliers documented**: Atypical results are excluded/downgraded/noted
-6. **Cautious correlations**: Only with N>=10
-7. **Inferred metrics explicit**: Tag as [INF-M] or [INF-B]
-8. **Descriptive prediction**: "team scores 2.1 goals on average" — NOT "bet on Over"
-9. **Always structured output**: Identical format for comparability
-10. **Fast vs deep mode**: User chooses, don't force
-
----
-
-## Analysis Storage
-
-Analyses are saved to:
-
-```
-./claude/skills/football-betting-analysis/football-analysis/
+Confidence: [very low / low / medium / medium-high / high]
 ```
 
-Folder structure by competition:
+## Data Storage
 
+Analysis files are saved to:
 ```
-Champions League 25-26/
-LaLiga 25-26/
-Premier League 25-26/
-...
-```
-
-File naming:
-
-```
-HOMETEAM_AWAYTEAM_DD_MM_YYYY(ROUND_X).txt
+./claude/skills/football-betting-analysis/<league_name>/<DD_MM_YYYY> [Home] vs [Away] [Jornada_X].txt
 ```
 
 Example:
+```
+./claude/skills/football-betting-analysis/Champions League 25-26/08_04_2026 Barcelona vs Real Madrid Jornada_X.txt
+```
 
-```
-RealMadrid_Barcelona_15_05_2026(ROUND_34).txt
-Bayern_Liverpool_01_04_2026(QUARTERS_2).txt
-```
+## Anti-Rationalization Rules
+
+These rules are **mandatory**. Never:
+
+- Invent data when `[N/A]` — if player-stats is missing, say so
+- Use SofaScore, Flashscore, Transfermarkt, or any source other than Bzzoiro API
+- Build a heuristic model to replace the ML prediction
+- Say "will win", "it's certain", "over 2.5 is guaranteed"
+- Skip contradictions — if market and ML favor different sides, say so explicitly
+- Leave a section blank — if data is missing, write `[N/A]` with brief reason
+- Analyze a match that has already started or finished
+
+## Design Goals
+
+- Single authoritative source (Bzzoiro API only)
+- No data fabrication
+- Probabilistic language at all times
+- Graceful degradation when data is missing
+- Transparent confidence levels
+- Structured, reproducible output
