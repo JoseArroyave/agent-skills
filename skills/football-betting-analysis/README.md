@@ -28,7 +28,7 @@ Agent parses query
     │
     ▼
 Phase 1: Match Discovery (MCP direct)
-    Get_Matches_by_day / Get_Matches_by_date
+    teams.csv lookup → Get_Team_Fixtures → Get_Team_Results (fallback)
     → event_id, home_team_id, away_team_id
     │
     ▼
@@ -106,7 +106,7 @@ npx skills add JoseArroyave/agent-skills --skill football-betting-analysis
 The skill is invoked automatically when the user requests pre-match football analysis. The agent:
 
 1. Parses the natural language query into structured fields
-2. **Phase 1:** Discovers the match via FlashScore MCP (`Get_Matches_by_day` / `Get_Matches_by_date`) → extracts `event_id`, `home_team_id`, `away_team_id`
+2. **Phase 1:** Looks up team IDs from `teams.csv`, then discovers the match via FlashScore MCP (`Get_Team_Fixtures` → `Get_Team_Results` fallback) → extracts `event_id`, `home_team_id`, `away_team_id`
 3. **Phase 2:** Executes `build_match_context.py` with those three IDs → receives `final_context` JSON
 4. Runs the 8-layer analysis pipeline using only the data in `final_context`
 5. Produces a structured report with confidence level
@@ -139,10 +139,10 @@ The skill is invoked automatically when the user requests pre-match football ana
 
 ## Data Flow — MCP vs Script
 
-| What            | How                                                  |
-| --------------- | ---------------------------------------------------- |
-| Match discovery | `Get_Matches_by_day` / `Get_Matches_by_date` via MCP |
-| All other data  | `build_match_context.py` (internal API calls)        |
+| What            | How                                                               |
+| --------------- | ----------------------------------------------------------------- |
+| Match discovery | `teams.csv` → `Get_Team_Fixtures` → `Get_Team_Results` via MCP       |
+| All other data  | `build_match_context.py` (internal API calls)                        |
 
 **The model must not call any MCP endpoint after receiving `final_context`.**
 
@@ -369,17 +369,16 @@ These rules are **mandatory**. Never:
 
 ## What Does NOT Exist in FlashScore
 
-| Non-existent data           | Consequence                                                   |
-| --------------------------- | ------------------------------------------------------------- |
-| Confirmed pre-match lineups | `Get_Match_Lineups` may be empty pre-match. Do not invent.    |
-| Historical injury data      | Not available. Do not invent.                                 |
-| Pre-match H2H confirmations | H2H is built from team results. May be partial (< 3 records). |
+| Non-existent data           | Consequence                                                     |
+| -------------------------- | --------------------------------------------------------------- |
+| Confirmed pre-match lineups | `Get_Match_Lineups` exists but may be empty pre-match. Do not invent. |
+| Historical injury data      | Not available. Do not invent.                                   |
 
 ## Pipeline Rules (Summary)
 
 ```
 Phase 1 (MCP direct):
-  Get_Matches_by_day / Get_Matches_by_date
+  teams.csv → Get_Team_Fixtures → Get_Team_Results (fallback)
   → Extract: event_id, home_team_id, away_team_id
 
 Phase 2 (build_match_context.py):

@@ -52,30 +52,29 @@ porcentajes.
 
 ### Endpoints utilizados
 
-| Endpoint                                     | Uso                                                                                     |
-| -------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `Get_Matches_by_day` / `Get_Matches_by_date` | Match discovery                                                                         |
-| `Get_Match_Details`                          | Evento completo + odds                                                                  |
-| `Get_Match_H2H`                              | Head-to-head                                                                            |
-| `Get_Match_Stats`                            | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.) |
-| `Get_Match_Player_Stats`                     | Stats por jugador                                                                       |
-| `Get_Match_Lineups`                          | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia              |
-| `Get_Match_Summary`                          | Resumen con eventos clave                                                               |
-| `Get_Match_Commentary`                       | Commentary (para contexto de estilo, no como fuente principal)                          |
-| `Get_Team_Results`                           | Historial de resultados del equipo                                                      |
-| `Get_Team_Fixtures`                          | Próximos partidos del equipo                                                            |
-| `Get_Tournament_Standings`                   | Contexto de forma/posición en torneo                                                    |
-| `Get_Match_Standings_OverUnder`              | Standings O/U                                                                           |
-| `Get_Tournament_Top_Scorers`                 | Goleadores del torneo                                                                   |
-| `Get_Match_Standings_Form`                   | Forma reciente dentro del partido                                                       |
+| Endpoint                        | Uso                                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------------------- |
+| `Get_Match_Details`             | Evento completo + odds                                                                  |
+| `Get_Match_H2H`                 | Head-to-head                                                                            |
+| `Get_Match_Stats`               | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.) |
+| `Get_Match_Player_Stats`        | Stats por jugador                                                                       |
+| `Get_Match_Lineups`             | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia              |
+| `Get_Match_Summary`             | Resumen con eventos clave                                                               |
+| `Get_Match_Commentary`          | Commentary (para contexto de estilo, no como fuente principal)                          |
+| `Get_Team_Results`              | Match discovery (fallback) + historial de resultados del equipo                         |
+| `Get_Team_Fixtures`             | Match discovery (primario) — próximos partidos del equipo                               |
+| `Get_Tournament_Standings`      | Contexto de forma/posición en torneo                                                    |
+| `Get_Match_Standings_OverUnder` | Standings O/U                                                                           |
+| `Get_Tournament_Top_Scorers`    | Goleadores del torneo                                                                   |
+| `Get_Match_Standings_Form`      | Forma reciente dentro del partido                                                       |
 
 ### Lo que NO existe en FlashScore (y nunca se debe inventar)
 
-| Qué no existe                                     | Consecuencia                                               |
-| ------------------------------------------------- | ---------------------------------------------------------- |
-| Alineaciones confirmadas pre-partido              | Pueden venir vacías. No inventar alineación.               |
-| Histórico de lesiones pre-existentes              | No existe en la API. No inventar.                          |
-| `missingPlayers` sin datos en `Get_Match_Lineups` | Si el endpoint no lo trae → no inventar motivo ni jugador. |
+| Qué no existe                                     | Consecuencia                                                                                                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Alineaciones confirmadas pre-partido              | El endpoint `Get_Match_Lineups` existe, pero las alineaciones confirmadas pueden no estar disponibles aún. Pueden venir vacías. No inventar alineación. |
+| Histórico de lesiones pre-existentes              | No existe en la API. No inventar.                                                                                                                       |
+| `missingPlayers` sin datos en `Get_Match_Lineups` | Si el endpoint no lo trae → no inventar motivo ni jugador.                                                                                              |
 
 **Nota:** `Get_Match_Lineups` puede aportar `missingPlayers` (nombre + motivo) incluso cuando las alineacionesConfirmed no existen. Usar ese dato cuando esté disponible.
 
@@ -124,30 +123,73 @@ De la consulta en lenguaje natural extraer:
 
 ### 4.2 Match Discovery (Fase 1 — SOLO esta fase usa MCP directamente)
 
+**Paso 1 — Lookup de equipos en /data/teams.csv:**
+
 ```
-1. Get_Matches_by_day / Get_Matches_by_date
-   → Usar rango de fechas si date_from ≠ date_to
-   → Si falla: "No pude consultar la API. Verificá conexión."
-2. Normalizar nombres y buscar fuzzy en home_team / away_team
-   → Si 0 resultados: "No encontré ningún partido para esas fechas."
-   → Si 1 resultado: proceed.
-   → Si >1 resultado: clarificación obligatoria.
-3. Verificar estado del evento:
+1. Normalizar nombres de ambos equipos (minúsculas, sin acentos, sin puntos)
+2. Buscar match exacto en /data/teams.csv después de normalizar
+   → Si 1 resultado: proceed con ese team_id
+   → Si >1 resultado: clarificación obligatoria ("¿Buscás [equipo A] o [equipo B]?")
+3. Si 0 resultados exactos: intentar substring match
+   → Si 1 resultado: proceed
+   → Si >1 resultado: clarificación obligatoria
+4. Si 0 resultados: buscar coincidencias cercanas (similitud string)
+   → Calcular similaridad entre nombre buscado y todos los nombres en /data/teams.csv
+   → Si hay candidatos con similitud ≥ umbral (ej: Levenshtein ratio ≥ 0.6):
+      → Si 1 candidato cercano: "¿Quisiste decir [nombre]?"
+      → Si >1 candidatos: mostrar top 3: "¿Buscás alguno de estos? [A], [B], [C]"
+   → Si ningún candidato cercano: "No encontré '[equipo]'. Verificá el nombre."
+```
+
+**Normalización para /data/teams.csv:**
+
+- Minúsculas
+- Quitar acentos: á→a, é→e, í→i, ó→o, ú→u
+- Quitar puntos: "Atl." → "Atl"
+- Quitar espacios extra
+
+**Sugerencia de близкие candidatos:**
+
+- Umbral de similaridad: ratio ≥ 0.6 (Levenshtein o similar)
+- Mostrar máximo 3 candidatos ordenados por similaridad descendente
+- Incluir el nombre original del CSV (sin normalizar) en la sugerencia
+
+**Paso 2 — Búsqueda por overlap en fixtures:**
+
+```
+3. Get_Team_Fixtures(team_id_home, page=1)
+   → Get_Team_Fixtures(team_id_away, page=1)
+4. Filtrar fixtures del rango date_from..date_to
+5. Buscar partido donde home_team_id o away_team_id de un fixture
+   coincida con el team_id del otro equipo (overlap)
+   → Si 1 resultado: proceed
+   → Si >1 resultado: priorizar por fecha más cercana al rango solicitado
+   → Si 0: ir a paso 6
+```
+
+**Paso 3 — Fallback a results:**
+
+```
+6. Get_Team_Results(team_id_home, page=1)
+   → Get_Team_Results(team_id_away, page=1)
+7. Buscar overlap (misma lógica que fixtures)
+   → Si 1 resultado: proceed
+   → Si >1: priorizar por fecha más cercana
+   → Si 0: "No encontré el partido [Home] vs [Away] en las fechas indicadas."
+```
+
+**Paso 4 — Verificación y extracción:**
+
+```
+8. Verificar estado del evento:
    → status = "notstarted" → proceed.
    → status = "inprogress": "Ese partido ya está en juego."
    → status = "finished":   "Ese partido ya terminó."
-4. Extraer IDs:
+9. Extraer IDs:
    → event_id = del evento encontrado
    → home_team_id = del equipo local
    → away_team_id = del equipo visitante
 ```
-
-**Nota sobre fuzzy matching:**
-
-- Intentar primero match exacto (case-insensitive).
-- Si no hay exacto, intentar substring.
-- Si no, intento sin acentos.
-- Si ninguno funciona → "No encontré '[equipo]'. Verificá el nombre."
 
 **Priorización cuando hay múltiples candidatos:**
 
@@ -848,7 +890,7 @@ Todo lo que sigue **no se puede hacer**, sin excepción:
 
 ### No interpretar mal FlashScore MCP
 
-- `Get_Matches_by_day` / `Get_Matches_by_date` es la vía de match discovery.
+- `Get_Team_Fixtures` / `Get_Team_Results` es la vía de match discovery.
   No existe `/api/events/?team=X`.
 - El estado de partido para pre-partido es `notstarted`. Si viene `inprogress` o
   `finished` → no analizar.
@@ -903,7 +945,7 @@ Confianza global: [muy baja/baja/media/media-alta/alta]
 CONSULTA NL → parsing → { home, away, date_from, date_to, league? }
 
 Fase 1 (MCP directo):
-  Match discovery:   Get_Matches_by_day / Get_Matches_by_date
+  Match discovery:   /data/teams.csv → Get_Team_Fixtures → Get_Team_Results
   → Extraer: event_id, home_team_id, away_team_id
 
 Fase 2 (build_match_context.py):
@@ -911,12 +953,7 @@ Fase 2 (build_match_context.py):
   → Devuelve final_context JSON con todos los datos normalizados
 
 NO LLAMAR ENDPOINTS MCP DIRECTAMENTE PARA DATOS DEL PARTIDO.
-Solo Get_Matches_by_day/Get_Matches_by_date para descubrimiento.
-
-NO EXISTE EN FLASHCORE:
-  Alineaciones anticipadas confirmadas
-  Histórico de lesiones pre-existentes
-  /api/events/?team=X
+Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 ```
 
 **Umbrales de confianza:**
@@ -936,24 +973,24 @@ NO EXISTE EN FLASHCORE:
 
 ## 10. Agujeros Cerrados
 
-| Racionalización                                                                                | Contramedida                                                                                                                                                   |
-| ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Usé Bzzoiro/SofaScore/otra fuente porque FlashScore no tenía"                                 | **Prohibido.** Solo FlashScore MCP. Sin excepciones.                                                                                                           |
-| "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 Carril B: usar `missingPlayers` de `Get_Match_Lineups` si existe. Si no hay nada → [N/A].                                                |
-| "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                                                               |
-| "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee.                                                |
-| "El partido ya empezó pero el análisis salió igual"                                            | **Prohibido.** Si status = inprogress/finished → no analizar.                                                                                                  |
-| "No había injuries data así que inventé lesionados"                                            | **Prohibido.** Si `missingPlayers` no está disponible → no inventar ausencia ni motivo.                                                                        |
-| "Calculé cuánto baja el equipo por cada ausente"                                               | **Prohibido.** No estimar impacto numérico de ausencias. Usar solo lo que la API provee + niveles de ausencia definidos.                                       |
-| "Usé missingPlayers como señal fuerte por sí sola"                                             | **Prohibido.** Ausencias sin corroboración en otras capas = señal débil. Nunca señal fuerte.                                                                   |
-| "El H2H no venía así que puse lo que sabía de memoria"                                         | **Prohibido.** Si Get_Match_H2H = null → "H2H no disponible [N/A]."                                                                                            |
-| "Le puse 'Alta' aunque solo tenía el evento"                                                   | **Prohibido.** Evento solo = confianza Baja. Tabla de umbrales es obligatoria.                                                                                 |
-| "El over entra seguro"                                                                         | **Prohibido.** Lenguaje probabilístico siempre.                                                                                                                |
-| "Rellené la capa 3 con nombres de memoria"                                                     | **Prohibido.** Cada capa tiene output definido. Si no hay datos → [N/A].                                                                                       |
-| "La muestra de 2 partidos es representativa"                                                   | **Prohibido.** N<5 = "muestra limitada." Indicadores pesan menos.                                                                                              |
-| "Calculé un impact score con pesos 0.3/0.5"                                                    | **Prohibido.** Capa 3 usa datos directos y rankings, no fórmulas heurísticas.                                                                                  |
-| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary solo válido si coincide con indicadores de otras capas.                                                                              |
-| "Llamé a Get_Match_Details/H2H/Stats directamente desde el modelo"                             | **Prohibido.** Toda la recolección de datos del partido pasa por `build_match_context.py`. Solo `Get_Matches_by_day/Get_Matches_by_date` para match discovery. |
-| "El script emitió un warning pero el dato me parecía correcto"                                 | **Prohibido.** Los warnings del script son instrucciones. Si el script marca un dato como sospechoso → respetarlo y no contradecirlo.                          |
-| "El JSON tenía [N/A] pero yo sabía el dato de memoria"                                         | **Prohibido.** El JSON ya normalizó y marcó los datos disponibles. No re-inventar datos marcados como [N/A].                                                   |
-| "Ejecuté endpoints MCP adicionales después de recibir el JSON"                                 | **Prohibido.** Una vez recibido `final_context`, todos los datos del análisis vienen del JSON. No consultar endpoints adicionales.                             |
+| Racionalización                                                                                | Contramedida                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Usé Bzzoiro/SofaScore/otra fuente porque FlashScore no tenía"                                 | **Prohibido.** Solo FlashScore MCP. Sin excepciones.                                                                                                       |
+| "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 Carril B: usar `missingPlayers` de `Get_Match_Lineups` si existe. Si no hay nada → [N/A].                                            |
+| "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                                                           |
+| "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee.                                            |
+| "El partido ya empezó pero el análisis salió igual"                                            | **Prohibido.** Si status = inprogress/finished → no analizar.                                                                                              |
+| "No había injuries data así que inventé lesionados"                                            | **Prohibido.** Si `missingPlayers` no está disponible → no inventar ausencia ni motivo.                                                                    |
+| "Calculé cuánto baja el equipo por cada ausente"                                               | **Prohibido.** No estimar impacto numérico de ausencias. Usar solo lo que la API provee + niveles de ausencia definidos.                                   |
+| "Usé missingPlayers como señal fuerte por sí sola"                                             | **Prohibido.** Ausencias sin corroboración en otras capas = señal débil. Nunca señal fuerte.                                                               |
+| "El H2H no venía así que puse lo que sabía de memoria"                                         | **Prohibido.** Si Get_Match_H2H = null → "H2H no disponible [N/A]."                                                                                        |
+| "Le puse 'Alta' aunque solo tenía el evento"                                                   | **Prohibido.** Evento solo = confianza Baja. Tabla de umbrales es obligatoria.                                                                             |
+| "El over entra seguro"                                                                         | **Prohibido.** Lenguaje probabilístico siempre.                                                                                                            |
+| "Rellené la capa 3 con nombres de memoria"                                                     | **Prohibido.** Cada capa tiene output definido. Si no hay datos → [N/A].                                                                                   |
+| "La muestra de 2 partidos es representativa"                                                   | **Prohibido.** N<5 = "muestra limitada." Indicadores pesan menos.                                                                                          |
+| "Calculé un impact score con pesos 0.3/0.5"                                                    | **Prohibido.** Capa 3 usa datos directos y rankings, no fórmulas heurísticas.                                                                              |
+| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary solo válido si coincide con indicadores de otras capas.                                                                          |
+| "Llamé a Get_Match_Details/H2H/Stats directamente desde el modelo"                             | **Prohibido.** Toda la recolección de datos del partido pasa por `build_match_context.py`. Solo `Get_Team_Fixtures/Get_Team_Results` para match discovery. |
+| "El script emitió un warning pero el dato me parecía correcto"                                 | **Prohibido.** Los warnings del script son instrucciones. Si el script marca un dato como sospechoso → respetarlo y no contradecirlo.                      |
+| "El JSON tenía [N/A] pero yo sabía el dato de memoria"                                         | **Prohibido.** El JSON ya normalizó y marcó los datos disponibles. No re-inventar datos marcados como [N/A].                                               |
+| "Ejecuté endpoints MCP adicionales después de recibir el JSON"                                 | **Prohibido.** Una vez recibido `final_context`, todos los datos del análisis vienen del JSON. No consultar endpoints adicionales.                         |
