@@ -15,6 +15,8 @@ import sys
 import json
 import requests
 import re
+import html
+from bs4 import BeautifulSoup
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
@@ -123,6 +125,199 @@ def fetch_team_fixtures(team_id: str, page: int = 1) -> Optional[Dict]:
     """Get upcoming fixtures for a team."""
     return api_get("/teams/fixtures", params={"team_id": team_id, "page": page})
 
+
+def build_preview_slug(team_url: str) -> str:
+    """Convert team URL to URL slug format for FlashScore preview URL."""
+    if not team_url: return ""
+    slug = team_url.lower()
+    slug = team_url.split("/")[2]
+    slug = re.sub(r"[áàä]", "a", slug)
+    slug = re.sub(r"[éèë]", "e", slug)
+    slug = re.sub(r"[íìï]", "i", slug)
+    slug = re.sub(r"[óòö]", "o", slug)
+    slug = re.sub(r"[úùü]", "u", slug)
+    slug = slug.replace(" ", "-")
+    slug = re.sub(r"[^a-z0-9-]", "", slug)
+    slug = re.sub(r"-+", "-", slug)
+    return slug.strip("-")
+
+import re
+import sys
+import html
+import requests
+from bs4 import BeautifulSoup
+from typing import Dict, Optional
+
+
+def fix_mojibake(text: str) -> str:
+    """
+    Fix common mojibake issues like:
+    'PeÃ±arol' -> 'Peñarol'
+    'verÃ¡n' -> 'verán'
+    """
+    if not text:
+        return text
+
+    # Caso típico: UTF-8 interpretado como latin1
+    try:
+        repaired = text.encode("latin1").decode("utf-8")
+        text = repaired
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+
+    replacements = {
+        "â€œ": '"',
+        "â€\x9d": '"',
+        "â€˜": "'",
+        "â€™": "'",
+        "â€“": "–",
+        "â€”": "—",
+        "â€¦": "…",
+        "Â ": " ",
+        "Â": "",
+    }
+
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+
+    return text
+
+
+def clean_preview(preview: Optional[str]) -> Optional[str]:
+    """
+    Clean Flashscore preview text:
+    - fixes encoding issues
+    - removes pseudo-tags
+    - removes sponsored section
+    - removes line breaks (returns single paragraph)
+    """
+    if not preview:
+        return None
+
+    text = html.unescape(preview)
+
+    # Fix escaped slashes: \/ -> /
+    text = text.replace("\\/", "/")
+
+    # Fix encoding
+    text = fix_mojibake(text)
+
+    # Remove opening pseudo-tags like [a ...]
+    text = re.sub(r"\[a[^\]]*\]", "", text)
+
+    # Replace structural tags
+    text = text.replace("[/h2]", ". ")
+    text = text.replace("[/p]", " ")
+    text = text.replace("[/b]", "")
+    text = text.replace("[/a]", "")
+
+    # Remove simple opening tags
+    text = text.replace("[h2]", "")
+    text = text.replace("[p]", "")
+    text = text.replace("[b]", "")
+    text = text.replace("[a]", "")
+
+    # 🔥 Eliminar todo desde "Patrocinado:"
+    text = re.split(r"Patrocinado:", text, flags=re.IGNORECASE)[0]
+
+    # Normalizar espacios
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+def extract_preview_from_dom(resp_text: str) -> Optional[str]:
+    """
+    Try to extract preview from rendered HTML block.
+    """
+    soup = BeautifulSoup(resp_text, "html.parser")
+
+    selectors = [
+        "div.section--preview div.fp-body_9caht",
+        "div.section--preview div.preview__block",
+        "div.loadable.complete.section.section--preview div.preview__block",
+    ]
+
+    for selector in selectors:
+        element = soup.select_one(selector)
+        if element:
+            text = element.get_text(" ", strip=True)
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                return text
+
+    return None
+
+
+def extract_preview_from_content_parsed(resp_text: str) -> Optional[str]:
+    """
+    Extract preview from embedded eventPreview.contentParsed JSON-like string.
+    """
+    patterns = [
+        r'"eventPreview":\{.*?"contentParsed":"(.*?)","editedAt":',
+        r'"contentParsed":"(.*?)","editedAt":',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, resp_text, re.DOTALL)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def fetch_preview(home_slug: Dict, away_slug: Dict, event_id: str) -> Optional[str]:
+    """
+    Scrape and clean preview text from FlashScore page.
+    Tries both URL orders, DOM extraction first, then embedded contentParsed fallback.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+    }
+
+    candidate_urls = [
+        (
+            f"https://www.flashscore.co/partido/futbol/"
+            f"{home_slug['slug']}-{home_slug['id']}/"
+            f"{away_slug['slug']}-{away_slug['id']}/?mid={event_id}"
+        ),
+        (
+            f"https://www.flashscore.co/partido/futbol/"
+            f"{away_slug['slug']}-{away_slug['id']}/"
+            f"{home_slug['slug']}-{home_slug['id']}/?mid={event_id}"
+        ),
+    ]
+
+    for url in candidate_urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            print(f"[INFO] Fetching preview from {url} - Status code: {resp.status_code}")
+            resp.raise_for_status()
+
+            # 1) Try DOM
+            preview = extract_preview_from_dom(resp.text)
+            if preview:
+                cleaned = clean_preview(preview)
+                if cleaned:
+                    print(f"[INFO] Preview found in DOM using URL: {url}")
+                    return cleaned
+
+            # 2) Try embedded eventPreview.contentParsed
+            preview = extract_preview_from_content_parsed(resp.text)
+            if preview:
+                cleaned = clean_preview(preview)
+                if cleaned:
+                    print(f"[INFO] Preview found in contentParsed using URL: {url}")
+                    return cleaned
+
+            print(f"[INFO] No preview found in URL: {url}")
+
+        except Exception as e:
+            print(f"[WARNING] Preview scrape failed for {event_id} in {url}: {e}", file=sys.stderr)
+
+    print(f"[INFO] Preview block not found for event {event_id}")
+    return None
 
 def fetch_tournament_standings(tournament_id: str, tournament_stage_id: str, stype: str = "overall") -> Optional[List]:
     """Get tournament standings (overall/home/away)."""
@@ -1184,6 +1379,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "player_stats": {},
         "lineups": {},
         "summary": {},
+        "preview": {},  # string o null — web scraping de FlashScore preview
         "commentary": None,
         "standings": {},
         "overunder_standings": {},
@@ -1205,6 +1401,8 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
 
     home_epid = details.get("home_team", {}).get("event_participant_id")
     away_epid = details.get("away_team", {}).get("event_participant_id")
+    home_url = details.get("home_team", {}).get("team_url")
+    away_url = details.get("away_team", {}).get("team_url")
     home_name = details.get("home_team", {}).get("name")
     away_name = details.get("away_team", {}).get("name")
     tournament_id = details.get("tournament", {}).get("tournament_id")
@@ -1305,13 +1503,23 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         final["summary"]["warnings"] = ["Match summary not available [N/A]"]
 
     # -------------------------------------------------------------------------
-    # 9. COMMENTARY (just store first few entries as preview)
+    # 9. COMMENTARY (minute-by-minute live commentary — solo para partidos inprogress/finished, no para notstarted)
     # -------------------------------------------------------------------------
     commentary_raw = fetch_match_commentary(event_id)
     if commentary_raw:
         final["commentary"] = commentary_raw[:5]  # first 5 entries as preview
     else:
         final["commentary"] = None
+
+    # -------------------------------------------------------------------------
+    # PREVIEW (web scraping)
+    # -------------------------------------------------------------------------
+    home_slug = {"slug": build_preview_slug(home_url), "id": home_team_id}
+    away_slug = {"slug": build_preview_slug(away_url), "id": away_team_id}
+    preview_raw = fetch_preview(home_slug, away_slug, event_id)
+    final["preview"] = preview_raw
+    if not preview_raw:
+        final["preview"] = {"warnings": ["Match preview not available [N/A]"]}
 
     # -------------------------------------------------------------------------
     # 10. TOURNAMENT STANDINGS

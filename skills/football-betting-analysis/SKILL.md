@@ -52,21 +52,21 @@ porcentajes.
 
 ### Endpoints utilizados
 
-| Endpoint                        | Uso                                                                                     |
-| ------------------------------- | --------------------------------------------------------------------------------------- |
-| `Get_Match_Details`             | Evento completo + odds                                                                  |
-| `Get_Match_H2H`                 | Head-to-head                                                                            |
-| `Get_Match_Stats`               | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.) |
-| `Get_Match_Player_Stats`        | Stats por jugador                                                                       |
-| `Get_Match_Lineups`             | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia              |
-| `Get_Match_Summary`             | Resumen con eventos clave                                                               |
-| `Get_Match_Commentary`          | Commentary (para contexto de estilo, no como fuente principal)                          |
-| `Get_Team_Results`              | Match discovery (fallback) + historial de resultados del equipo                         |
-| `Get_Team_Fixtures`             | Match discovery (primario) — próximos partidos del equipo                               |
-| `Get_Tournament_Standings`      | Contexto de forma/posición en torneo                                                    |
-| `Get_Match_Standings_OverUnder` | Standings O/U                                                                           |
-| `Get_Tournament_Top_Scorers`    | Goleadores del torneo                                                                   |
-| `Get_Match_Standings_Form`      | Forma reciente dentro del partido                                                       |
+| Endpoint                        | Uso                                                                                      |
+| ------------------------------- | ---------------------------------------------------------------------------------------- |
+| `Get_Match_Details`             | Evento completo + odds                                                                   |
+| `Get_Match_H2H`                 | Head-to-head                                                                             |
+| `Get_Match_Stats`               | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.)  |
+| `Get_Match_Player_Stats`        | Stats por jugador                                                                        |
+| `Get_Match_Lineups`             | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia               |
+| `Get_Match_Summary`             | Resumen con eventos clave                                                                |
+| `Get_Match_Commentary`          | Commentary minuto a minuto (solo para partidos inprogress/finished — no para notstarted) |
+| `Get_Team_Results`              | Match discovery (fallback) + historial de resultados del equipo                          |
+| `Get_Team_Fixtures`             | Match discovery (primario) — próximos partidos del equipo                                |
+| `Get_Tournament_Standings`      | Contexto de forma/posición en torneo                                                     |
+| `Get_Match_Standings_OverUnder` | Standings O/U                                                                            |
+| `Get_Tournament_Top_Scorers`    | Goleadores del torneo                                                                    |
+| `Get_Match_Standings_Form`      | Forma reciente dentro del partido                                                        |
 
 ### Lo que NO existe en FlashScore (y nunca se debe inventar)
 
@@ -322,7 +322,8 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     goals_home, goals_away,
     warnings: string[] | null
   },
-  "commentary": [...] (primeras 5 entradas) | null,
+  "commentary": [{ minutes, description }] (primeras 5 entradas) | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
+  "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
   "standings": {
     teams: { [team_id]: { position, name, points, wins, draws, losses, goals, goal_difference } },
     warnings: string[] | null
@@ -543,8 +544,9 @@ Si `missingPlayers` contiene jugadores ausentes, reportarlos en el Carril B.
 - No estimar goles perdidos ni probabilidad de gol afectada.
 - La acumulación de ausencias en un mismo equipo puede mencionarse como observación contextual (reduce certidumbre sobre el techo de rendimiento del equipo), pero sin cifras inventadas.
 
-**Commentary (uso regulado):**
+**Commentary minuto a minuto (uso regulado — solo para partidos inprogress/finished, no para notstarted):**
 
+- `Get_Match_Commentary` devuelve eventos minuto a minuto. **Para partidos notstarted viene vacío o no disponible.**
 - Commentary solo es válido si **coincide con indicadores de otras capas**.
 - No usar commentary como señal principal ni sobreinterpretar eventos aislados.
 - Si commentary describe un patrón no respaldado por stats → omitir o marcar como "dato observacional no concluyente".
@@ -647,9 +649,9 @@ Estabilidad muestra: [N] partidos / mínimo 5 — [suficiente/limitado]
 
 ### Capa 5 — Diagnóstica
 
-**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible).
+**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible — **solo para partidos inprogress/finished**).
 
-**Regla sobre commentary:**
+**Regla sobre commentary (solo para partidos inprogress/finished, no para notstarted):**
 
 - Commentary **solo es válido si coincide con indicadores de otras capas**.
 - No usar commentary como señal principal.
@@ -989,7 +991,7 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 | "Rellené la capa 3 con nombres de memoria"                                                     | **Prohibido.** Cada capa tiene output definido. Si no hay datos → [N/A].                                                                                   |
 | "La muestra de 2 partidos es representativa"                                                   | **Prohibido.** N<5 = "muestra limitada." Indicadores pesan menos.                                                                                          |
 | "Calculé un impact score con pesos 0.3/0.5"                                                    | **Prohibido.** Capa 3 usa datos directos y rankings, no fórmulas heurísticas.                                                                              |
-| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary solo válido si coincide con indicadores de otras capas.                                                                          |
+| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary es minuto a minuto — solo para partidos inprogress/finished. Para notstarted no está disponible.                                 |
 | "Llamé a Get_Match_Details/H2H/Stats directamente desde el modelo"                             | **Prohibido.** Toda la recolección de datos del partido pasa por `build_match_context.py`. Solo `Get_Team_Fixtures/Get_Team_Results` para match discovery. |
 | "El script emitió un warning pero el dato me parecía correcto"                                 | **Prohibido.** Los warnings del script son instrucciones. Si el script marca un dato como sospechoso → respetarlo y no contradecirlo.                      |
 | "El JSON tenía [N/A] pero yo sabía el dato de memoria"                                         | **Prohibido.** El JSON ya normalizó y marcó los datos disponibles. No re-inventar datos marcados como [N/A].                                               |

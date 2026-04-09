@@ -232,7 +232,8 @@ The script returns a single JSON with this structure:
     "goals_home", "goals_away",
     "warnings": null
   },
-  "commentary": [...] | null,
+  "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para inprogress/finished
+  "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa — web scraping FlashScore (DOM o contentParsed embebido)
   "standings": {
     "teams": { [team_id]: { "position", "name", "points", "wins", "draws", "losses", "goals", "goal_difference" } },
     "warnings": null
