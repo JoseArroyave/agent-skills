@@ -2,10 +2,10 @@
 name: football-betting-analysis
 description: >
   Análisis pre-partido de fútbol en 8 capas. Recibe una consulta en lenguaje
-  natural, descubre el partido en FlashScore MCP, reúne datos y produce un
-  informe estructurado con lenguaje probabilístico. Solo usa FlashScore MCP.
-  No inventa datos, no analiza partidos en curso ni finalizados, no suple
-  No analiza partidos en curso ni finalizados, no suple la predicción con modelos heurísticos.
+  natural, descubre el partido en FlashScore MCP, ejecuta build_match_context.py
+  para obtener un contexto normalizado en JSON, y produce un informe estructurado
+  con lenguaje probabilístico. No inventa datos, no analiza partidos en curso
+  ni finalizados, no suple la predicción con modelos heurísticos.
 ---
 
 # Football Betting Analysis
@@ -13,8 +13,12 @@ description: >
 ## 1. Overview
 
 Análisis pre-partido de fútbol en 8 capas. Recibe una consulta en lenguaje
-natural, descubre el partido en FlashScore MCP, reúne datos y produce un
+natural, descubre el partido en FlashScore MCP, ejecuta el script de preprocesamiento
+`build_match_context.py` para obtener un contexto JSON normalizado, y produce un
 informe estructurado con lenguaje probabilístico.
+
+El modelo no llama endpoints directamente (salvo para match discovery).
+Recibe datos ya limpios, normalizados y consolidados en `final_context`.
 
 El análisis es una interpretación de la evidencia disponible. No es un pick.
 No es una garantía. Siempre usa lenguaje como "podría", "señal", "sugiere".
@@ -55,6 +59,7 @@ porcentajes.
 | `Get_Match_H2H`                              | Head-to-head                                                                            |
 | `Get_Match_Stats`                            | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.) |
 | `Get_Match_Player_Stats`                     | Stats por jugador                                                                       |
+| `Get_Match_Lineups`                          | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia              |
 | `Get_Match_Summary`                          | Resumen con eventos clave                                                               |
 | `Get_Match_Commentary`                       | Commentary (para contexto de estilo, no como fuente principal)                          |
 | `Get_Team_Results`                           | Historial de resultados del equipo                                                      |
@@ -66,10 +71,13 @@ porcentajes.
 
 ### Lo que NO existe en FlashScore (y nunca se debe inventar)
 
-| Qué no existe                        | Consecuencia                                              |
-| ------------------------------------ | --------------------------------------------------------- |
-| Alineaciones anticipadas confirmadas | Puede venir vacío en pre-partido. No inventar alineación. |
-| Histórico de lesiones pre-existentes | No existe en la API. No inventar.                         |
+| Qué no existe                                     | Consecuencia                                               |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| Alineaciones confirmadas pre-partido              | Pueden venir vacías. No inventar alineación.               |
+| Histórico de lesiones pre-existentes              | No existe en la API. No inventar.                          |
+| `missingPlayers` sin datos en `Get_Match_Lineups` | Si el endpoint no lo trae → no inventar motivo ni jugador. |
+
+**Nota:** `Get_Match_Lineups` puede aportar `missingPlayers` (nombre + motivo) incluso cuando las alineacionesConfirmed no existen. Usar ese dato cuando esté disponible.
 
 **Fuente de cada señal en el análisis:**
 
@@ -114,10 +122,10 @@ De la consulta en lenguaje natural extraer:
 **Si solo un equipo matchea pero hay múltiples candidatos del rival:**
 → Clarificación obligatoria. Preguntar: "¿Buscás el [equipo] vs [candidato A] o vs [candidato B]?"
 
-### 4.2 Match Discovery (Fase 1)
+### 4.2 Match Discovery (Fase 1 — SOLO esta fase usa MCP directamente)
 
 ```
-1. GET /matches/list-by-date?date=X&sport_id=1
+1. Get_Matches_by_day / Get_Matches_by_date
    → Usar rango de fechas si date_from ≠ date_to
    → Si falla: "No pude consultar la API. Verificá conexión."
 2. Normalizar nombres y buscar fuzzy en home_team / away_team
@@ -128,6 +136,10 @@ De la consulta en lenguaje natural extraer:
    → status = "notstarted" → proceed.
    → status = "inprogress": "Ese partido ya está en juego."
    → status = "finished":   "Ese partido ya terminó."
+4. Extraer IDs:
+   → event_id = del evento encontrado
+   → home_team_id = del equipo local
+   → away_team_id = del equipo visitante
 ```
 
 **Nota sobre fuzzy matching:**
@@ -145,50 +157,176 @@ De la consulta en lenguaje natural extraer:
 4. **Si múltiples partidos del mismo equipo → priorizar el más cercano en el tiempo al rango de fechas de la consulta.** Esto evita clarificaciones innecesarias.
 5. Si no, clarificación obligatoria.
 
-### 4.3 Data Gathering (Fase 2)
+### 4.3 Preprocesamiento (Fase 2 — build_match_context.py)
 
-**OBLIGATORIA PARA INICIAR (si falla → análisis no viable):**
-
-```
-a) Get_Match_Details?match_id=X  → evento + odds
-```
-
-**OBLIGATORIAS DE INTENTO (siempre consultar cuando match_id / team_id / tournament_id esté disponible; si falla → [N/A] + degradar solo capa afectada):**
+**Esta es la única manera de obtener datos para el análisis. No usar endpoints MCP directamente para obtener datos del partido.**
 
 ```
-b) Get_Match_H2H?match_id=X              → Head-to-head
-c) Get_Match_Stats?match_id=X             → stats del partido (corners, tiros, posesión, tarjetas, xG)
-d) Get_Match_Player_Stats?match_id=X     → stats por jugador
-e) Get_Match_Commentary?match_id=X       → commentary (estilo, contexto)
-f) Get_Team_Results?team_id=X            → historial de resultados del equipo
-g) Get_Tournament_Standings?tournament_id=X → posición en torneo
+python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
 ```
 
-**REGLA GENERAL:**
+**Qué hace el script:**
 
-- Si alguno de estos endpoints devuelve datos → incorporarlos al análisis.
-- Si devuelve vacío, null, error o no aplica en pre-partido → marcar `[N/A]` y degradar solo la capa afectada.
-- La ausencia de datos **no autoriza a inventarlos** ni a sustituirlos con fuentes externas.
-- Sin evento (Get_Match_Details) no hay análisis; sin H2H puede haber análisis degradado.
+1. Ejecuta todas las llamadas a endpoints de FlashScore internally
+2. Normaliza H2H (descarta registros incoherentes o sospechosos)
+3. Resume historial de forma del equipo (GF, GC, over, BTTS, home/away split)
+4. Extrae y normaliza ausencias desde `Get_Match_Lineups`
+5. Valida qué mercados de odds existen realmente y bloquea los que no existan
+6. Procesa eventos del partido (goles, tarjetas) y genera métricas agregadas
+7. Integra estadísticas avanzadas (tiros, posesión, xG, etc.)
+8. Incorpora contexto de torneo (posición, forma, over/under standings)
+9. Emite warnings de consistencia
+10. Consolida toda la información en un único JSON (`final_context`)
 
-**Si falla OBLIGATORIA PARA INICIAR (a) evento:**
-→ Análisis no viable. Informar: "No pude obtener los datos del evento."
+**Output del script — `final_context`:**
 
-**Si falla OBLIGATORIA DE INTENTO (b-g):**
-→ Datos = [N/A]. Degradar solo la capa que dependía de ese endpoint.
-No inventar, no sustituir con fuentes externas.
+```
+{
+  "meta": {
+    event_id, home_team_id, away_team_id, generated_at
+  },
+  "match": {
+    event_id,
+    home_team: { id, name, event_participant_id },
+    away_team: { id, name, event_participant_id },
+    tournament: { id, stage_id, name },
+    country, referee, timestamp, datetime, status,
+    scores: {
+      home, away,
+      home_total, away_total,
+      home_1st_half, away_1st_half,
+      home_2nd_half, away_2nd_half,
+      home_extra_time, away_extra_time,
+      home_penalties, away_penalties
+    }
+  },
+  "odds": {
+    available_markets: string[],
+    odds_home, odds_draw, odds_away,
+    odds_over_25, odds_under_25,
+    odds_btts_yes, odds_btts_no,
+    warnings: string[]
+  },
+  "implied_probs": {
+    prob_home, prob_draw, prob_away,
+    prob_over_25, prob_btts_yes
+  },
+  "h2h": {
+    records: [{
+      match_id, timestamp,
+      home_score, away_score,
+      home_team, away_team,
+      tournament_id, tournament_name
+    }],
+    summary: { total_matches, home_wins, draws, away_wins, avg_goals },
+    warnings: string[]
+  },
+  "team_home_results": {
+    matches: [{
+      tournament_id, tournament_name, match_id, timestamp,
+      team_is_home, opponent,
+      goals_for, goals_against, total_goals, both_teams_scored
+    }],
+    form: {
+      last_n, form_string, points,
+      gf_avg, gc_avg,
+      over_25_freq, btts_freq,
+      home_ppg, home_gf_avg, home_gc_avg,
+      away_ppg, away_gf_avg, away_gc_avg
+    },
+    warnings: string[] | null
+  },
+  "team_away_results": {
+    matches: [...same shape...],
+    form: {...},
+    warnings: string[] | null
+  },
+  "match_stats": {
+    stats: [{ name, home_team, away_team, home_pct, away_pct }],
+    possession: { home, away },
+    total_shots: { home, away },
+    shots_on_target: { home, away },
+    corners: { home, away },
+    yellow_cards: { home, away },
+    red_cards: { home, away },
+    xg: { home, away },
+    xgotal: { home, away },
+    passes: { home: { accuracy_pct, completed }, away: {...} },
+    warnings: string[] | null
+  },
+  "player_stats": {
+    home_players: [{ player_id, name, short_name, position, in_base_lineup,
+                     goals, assists, shots, shots_on_target, key_passes,
+                     tackles_won, interceptions, ball_recoveries,
+                     yellow_cards, red_cards, minutes }],
+    away_players: [...same...],
+    top_scorers_home: [...],
+    top_scorers_away: [...],
+    top_assists_home: [...],
+    top_assists_away: [...],
+    top_shots_home: [...],
+    top_shots_away: [...],
+    top_key_passes_home: [...],
+    top_key_passes_away: [...],
+    warnings: string[] | null
+  },
+  "lineups": {
+    home: { formation, lineup_count, missing_players: [{ name, player_id, reason, country }], unsure_missing: [...] },
+    away: { formation, lineup_count, missing_players: [...], unsure_missing: [...] },
+    warnings: string[] | null
+  },
+  "summary": {
+    events: [{ minutes, team, type, description }],
+    goals_home, goals_away,
+    warnings: string[] | null
+  },
+  "commentary": [...] (primeras 5 entradas) | null,
+  "standings": {
+    teams: { [team_id]: { position, name, points, wins, draws, losses, goals, goal_difference } },
+    warnings: string[] | null
+  },
+  "overunder_standings": {
+    teams: { [team_id]: { over, under, average_goals } },
+    warnings: string[] | null
+  },
+  "form_standings": {
+    teams: { [team_id]: { points, form_string } },
+    warnings: string[] | null
+  },
+  "top_scorers": {
+    home_scorers: [{ name, player_id, team, goals, assists }],
+    away_scorers: [...],
+    warnings: string[] | null
+  },
+  "tournament_top_scorers": {
+    home_scorers: [...],
+    away_scorers: [...],
+    warnings: string[] | null
+  },
+  "indicators": {
+    offensive_dependency: [{
+      side, player, team_goals_in_sample, player_goals, pct_team_goals, dependency
+    }],
+    sample_stability: {
+      home: { n, stability },
+      away: { n, stability }
+    }
+  },
+  "warnings": []
+}
+```
 
-**Minimum viable data:**
+**Reglas de uso del script:**
 
-- Para análisis con 8 capas (degradadas si es necesario): evento + al menos odds.
-- Para predictiva (Capa 7): necesita odds del evento. Si no hay odds → no emitir lectura.
-- Para prescriptiva (Capa 8): necesita Capa 7 + al menos Capa 2 o Capa 4.
-  Si Capa 7 es muy baja confianza → Capa 8 también.
+- El modelo NO vuelve a llamar endpoints MCP después de recibir `final_context`.
+- Todos los datos del análisis vienen del JSON.
+- Si el script emite warnings → el modelo debe tomarlos en cuenta y no contradecirlos.
+- Si el JSON marca algo como `[N/A]` → el modelo lo usa como `[N/A]`, no intenta inferir el dato.
+- El script es determinista: dada la misma entrada, siempre produce la misma salida.
+- El modelo no recalcula ni reinterpreta datos ya normalizados salvo para explicar su significado.
 
-**Priorización cuando hay múltiples matches del mismo equipo:**
-→ Si hay múltiples partidos del mismo equipo, priorizar el más cercano
-en el tiempo al rango de fechas de la consulta. Esto evita clarificaciones
-innecesarias.
+**Si el script falla o no puede ejecutarse:**
+→ "No pude generar el contexto del partido. Análisis no viable."
 
 ---
 
@@ -283,7 +421,17 @@ Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
 
 ### Capa 3 — Protagonistas
 
-**Inputs directos de `Get_Match_Player_Stats`:**
+**Lógica de dos carriles (siempre intentar ambos):**
+
+- **Carril A:** `Get_Match_Player_Stats` → stats individuales (gol, asistencia, tiros, etc.)
+- **Carril B:** `Get_Match_Lineups` → `missingPlayers` (nombre + motivo de ausencia)
+
+Si Carril A falla pero Carril B devuelve `missingPlayers` → usar Carril B.
+Si ambos fallan → capa degradada con `[N/A]`.
+
+---
+
+**Carril A — Inputs directos de `Get_Match_Player_Stats`:**
 `goals`, `assists`, `shots`, `shots_on_target`, `key_passes`,
 `tackles_won`, `interceptions`, `ball_recoveries`, `yellow_cards`,
 `red_cards`, `minutes`.
@@ -331,6 +479,28 @@ Top creadores [IND]:
 - Umbral: >40% → "Dependencia ofensiva alta [IND]"
 - Si un equipo tiene >50% de producción en un solo jugador → alertar.
 
+---
+
+**Carril B — Fuente alternativa desde `Get_Match_Lineups.missingPlayers`:**
+
+Si `Get_Match_Player_Stats` no aporta datos en pre-partido, consultar `Get_Match_Lineups`.
+Si `missingPlayers` contiene jugadores ausentes, reportarlos en el Carril B.
+
+**Niveles de ausencia (en orden de profundidad):**
+
+1. **Ausencia observada [API]:** Nombre + motivo tal como los devuelve la API (Injury, Inactive, Leg Injury, etc.). Solo reportar lo que la API indica.
+
+2. **Ausencia contextualizada [IND]:** Si además ese jugador aparece en `Get_Tournament_Top_Scorers` o como goleador/generador relevante en `Get_Team_Results` o `Get_Match_Player_Stats` de partidos previos → indicar: "[jugador] ausente — registrado como goleador/top del torneo [IND]."
+
+3. **Influencia incierta [N/A/IND]:** Si un jugador está ausente pero no hay evidencia suficiente para estimar su peso → marcar como "influencia no cuantificable con precisión [N/A]". Nunca inventar impacto.
+
+**Regla sobre Carril B solo:**
+
+- Ausencias sin contexto adicional (no aparecen como goleadores relevantes, no hay ranking que los respalde) → reportar como simples hechos observados [API].
+- No calcular cuánto baja el equipo por cada ausente.
+- No estimar goles perdidos ni probabilidad de gol afectada.
+- La acumulación de ausencias en un mismo equipo puede mencionarse como observación contextual (reduce certidumbre sobre el techo de rendimiento del equipo), pero sin cifras inventadas.
+
 **Commentary (uso regulado):**
 
 - Commentary solo es válido si **coincide con indicadores de otras capas**.
@@ -342,10 +512,7 @@ Top creadores [IND]:
 ```
 ## 3. Protagonistas
 
-[Si no hay player-stats:]
-Sin datos disponibles de protagonistas [N/A] — capa degradada.
-
-[Si hay datos:]
+[Carril A — Si hay player-stats:]
 [Jugador] ([pos]):
   Producción:
   - Goles: X
@@ -362,6 +529,20 @@ Sin datos disponibles de protagonistas [N/A] — capa degradada.
 Dependencia ofensiva:
 - [Equipo]: [jugador] → [X]% de los goles del equipo [IND]
 
+[Carril B — Si hay missingPlayers sin player-stats:]
+Ausencias observadas [API]:
+- [Equipo]: [Jugador] — [motivo de la API]
+- [Equipo]: [Jugador] — [motivo de la API]
+
+[Si hay ausencia contextualizada:]
+- [Equipo]: [Jugador] — ausente [IND] — [goleador/top scorer del torneo / pieza habitual]
+
+Lectura contextual [IND]:
+- [Equipo] llega con [X] bajas registradas en la API.
+- La influencia de las ausencias se considera [alta/moderada/baja] solo si coincide con
+  otras señales disponibles (producción en排行榜, dependencia ofensiva, ranking histórico, etc.).
+- Influencia no cuantificable con precisión [N/A]: [jugador(es)].
+
 [Si commentary disponible Y coincide con indicadores:]
 Patrón de estilo observado: [descripción]
 
@@ -371,9 +552,9 @@ Patrón de estilo: [N/A] — dato observacional no respaldado por stats.
 
 **Degradación:**
 
-- Si no hay player-stats → texto obligatorio: "Sin datos suficientes de
-  protagonistas [N/A] — capa degradada." No inventar jugadores, alineaciones,
-  ni lesionados.
+- Si no hay player-stats NI missingPlayers → "Sin datos disponibles de protagonistas [N/A] — capa degradada." No inventar jugadores ni ausencias.
+- Si solo hay missingPlayers (Carril B) → capa Carril A = N/A; Carril B según niveles de ausencia definidos arriba.
+- Si hay ambos → usar Carril A y añadir Carril B como enriquecimiento.
 
 ---
 
@@ -475,11 +656,17 @@ Contradicciones:
 
 **Reglas de peso:**
 
-| Peso         | Qué cuenta                                                                              | Qué NO cuenta                                   |
-| ------------ | --------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| **Fuerte**   | Tiros, consistencia (N≥5), coincidencia mercado-indicadores, producción jugadores clave | Rachas cortas sin respaldo, marcadores aislados |
-| **Moderada** | Forma con N=3-4, H2H sin contexto de local/visita, diff mercado-historial moderada      |                                                 |
-| **Débil**    | N<3, diff mercado-historial alta, mercado sin respaldo en indicadores                   |                                                 |
+| Peso         | Qué cuenta                                                                                                                           | Qué NO cuenta                                   |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| **Fuerte**   | Tiros, consistencia (N≥5), coincidencia mercado-indicadores, producción jugadores clave                                              | Rachas cortas sin respaldo, marcadores aislados |
+| **Moderada** | Forma con N=3-4, H2H sin contexto de local/visita, diff mercado-historial moderada, múltiples ausencias corroboradas por otras capas |                                                 |
+| **Débil**    | N<3, diff mercado-historial alta, mercado sin respaldo en indicadores, ausencias sin corroboración de otras capas                    |                                                 |
+
+**Ausencias múltiples registradas en `Get_Match_Lineups.missingPlayers`:**
+
+- Pueden contar como señal **moderada** solo si coinciden con otras capas (producción del equipo, ranking, dependencia ofensiva, forma).
+- Nunca como señal **fuerte** por sí solas — una lista de ausentes, sola, no domina el análisis.
+- Si las ausencias no tienen corroboración en stats o rankings → señal **débil**.
 
 **Output obligatorio:**
 
@@ -565,6 +752,8 @@ Señales más fuertes (3-5):
 
 Alertas (2-3):
 ⚠ [alerta] — [razón]
+⚠ [equipo] llega con [X] ausencias registradas en la API [API] —
+  posible impacto en estabilidad, influencia no cuantificable con precisión.
 
 Mercados con sustento:
 - [mercado] → [razón]
@@ -713,22 +902,18 @@ Confianza global: [muy baja/baja/media/media-alta/alta]
 ```
 CONSULTA NL → parsing → { home, away, date_from, date_to, league? }
 
- Match discovery:   Get_Matches_by_day / Get_Matches_by_date
- Evento + odds:    Get_Match_Details?match_id=X
- H2H:              Get_Match_H2H?match_id=X
- Stats:            Get_Match_Stats?match_id=X
- Player stats:     Get_Match_Player_Stats?match_id=X
- Commentary:       Get_Match_Commentary?match_id=X
- Historial equipo: Get_Team_Results?team_id=X
- Forma/posición:   Get_Tournament_Standings?tournament_id=X
+Fase 1 (MCP directo):
+  Match discovery:   Get_Matches_by_day / Get_Matches_by_date
+  → Extraer: event_id, home_team_id, away_team_id
 
-OBLIGATORIA PARA INICIAR:  Get_Match_Details (sin evento → no hay análisis)
-OBLIGATORIAS DE INTENTO:   Get_Match_H2H, Get_Match_Stats, Get_Match_Player_Stats,
-                           Get_Match_Commentary, Get_Team_Results,
-                           Get_Tournament_Standings
-                           (si devuelve vacío/null → [N/A] + degradar solo capa afectada)
+Fase 2 (build_match_context.py):
+  python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
+  → Devuelve final_context JSON con todos los datos normalizados
 
-NO EXISTE EN FLASSCORE:
+NO LLAMAR ENDPOINTS MCP DIRECTAMENTE PARA DATOS DEL PARTIDO.
+Solo Get_Matches_by_day/Get_Matches_by_date para descubrimiento.
+
+NO EXISTE EN FLASHCORE:
   Alineaciones anticipadas confirmadas
   Histórico de lesiones pre-existentes
   /api/events/?team=X
@@ -751,18 +936,24 @@ NO EXISTE EN FLASSCORE:
 
 ## 10. Agujeros Cerrados
 
-| Racionalización                                                                                | Contramedida                                                                                                    |
-| ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| "Usé Bzzoiro/SofaScore/otra fuente porque FlashScore no tenía"                                 | **Prohibido.** Solo FlashScore MCP. Sin excepciones.                                                            |
-| "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 = "Sin datos suficientes [N/A]."                                                          |
-| "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                |
-| "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee. |
-| "El partido ya empezó pero el análisis salió igual"                                            | **Prohibido.** Si status = inprogress/finished → no analizar.                                                   |
-| "No había injuries data así que inventé lesionados"                                            | **Prohibido.** FlashScore no tiene injuries histórico. No inventar.                                             |
-| "El H2H no venía así que puse lo que sabía de memoria"                                         | **Prohibido.** Si Get_Match_H2H = null → "H2H no disponible [N/A]."                                             |
-| "Le puse 'Alta' aunque solo tenía el evento"                                                   | **Prohibido.** Evento solo = confianza Baja. Tabla de umbrales es obligatoria.                                  |
-| "El over entra seguro"                                                                         | **Prohibido.** Lenguaje probabilístico siempre.                                                                 |
-| "Rellené la capa 3 con nombres de memoria"                                                     | **Prohibido.** Cada capa tiene output definido. Si no hay datos → [N/A].                                        |
-| "La muestra de 2 partidos es representativa"                                                   | **Prohibido.** N<5 = "muestra limitada." Indicadores pesan menos.                                               |
-| "Calculé un impact score con pesos 0.3/0.5"                                                    | **Prohibido.** Capa 3 usa datos directos y rankings, no fórmulas heurísticas.                                   |
-| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary solo válido si coincide con indicadores de otras capas.                               |
+| Racionalización                                                                                | Contramedida                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Usé Bzzoiro/SofaScore/otra fuente porque FlashScore no tenía"                                 | **Prohibido.** Solo FlashScore MCP. Sin excepciones.                                                                                                           |
+| "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 Carril B: usar `missingPlayers` de `Get_Match_Lineups` si existe. Si no hay nada → [N/A].                                                |
+| "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                                                               |
+| "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee.                                                |
+| "El partido ya empezó pero el análisis salió igual"                                            | **Prohibido.** Si status = inprogress/finished → no analizar.                                                                                                  |
+| "No había injuries data así que inventé lesionados"                                            | **Prohibido.** Si `missingPlayers` no está disponible → no inventar ausencia ni motivo.                                                                        |
+| "Calculé cuánto baja el equipo por cada ausente"                                               | **Prohibido.** No estimar impacto numérico de ausencias. Usar solo lo que la API provee + niveles de ausencia definidos.                                       |
+| "Usé missingPlayers como señal fuerte por sí sola"                                             | **Prohibido.** Ausencias sin corroboración en otras capas = señal débil. Nunca señal fuerte.                                                                   |
+| "El H2H no venía así que puse lo que sabía de memoria"                                         | **Prohibido.** Si Get_Match_H2H = null → "H2H no disponible [N/A]."                                                                                            |
+| "Le puse 'Alta' aunque solo tenía el evento"                                                   | **Prohibido.** Evento solo = confianza Baja. Tabla de umbrales es obligatoria.                                                                                 |
+| "El over entra seguro"                                                                         | **Prohibido.** Lenguaje probabilístico siempre.                                                                                                                |
+| "Rellené la capa 3 con nombres de memoria"                                                     | **Prohibido.** Cada capa tiene output definido. Si no hay datos → [N/A].                                                                                       |
+| "La muestra de 2 partidos es representativa"                                                   | **Prohibido.** N<5 = "muestra limitada." Indicadores pesan menos.                                                                                              |
+| "Calculé un impact score con pesos 0.3/0.5"                                                    | **Prohibido.** Capa 3 usa datos directos y rankings, no fórmulas heurísticas.                                                                                  |
+| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary solo válido si coincide con indicadores de otras capas.                                                                              |
+| "Llamé a Get_Match_Details/H2H/Stats directamente desde el modelo"                             | **Prohibido.** Toda la recolección de datos del partido pasa por `build_match_context.py`. Solo `Get_Matches_by_day/Get_Matches_by_date` para match discovery. |
+| "El script emitió un warning pero el dato me parecía correcto"                                 | **Prohibido.** Los warnings del script son instrucciones. Si el script marca un dato como sospechoso → respetarlo y no contradecirlo.                          |
+| "El JSON tenía [N/A] pero yo sabía el dato de memoria"                                         | **Prohibido.** El JSON ya normalizó y marcó los datos disponibles. No re-inventar datos marcados como [N/A].                                                   |
+| "Ejecuté endpoints MCP adicionales después de recibir el JSON"                                 | **Prohibido.** Una vez recibido `final_context`, todos los datos del análisis vienen del JSON. No consultar endpoints adicionales.                             |
