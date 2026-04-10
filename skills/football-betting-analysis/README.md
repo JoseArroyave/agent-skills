@@ -1,6 +1,6 @@
 # Football Betting Analysis
 
-Pre-match football analysis in 8 layers. Receives a natural language query, discovers the match via FlashScore MCP, executes `build_match_context.py` to get a normalized JSON context, and produces a structured report with probabilistic language.
+Football match analysis in 8 layers, covering pre-match, live, and post-match modes. Receives a natural language query, discovers the match via FlashScore MCP, executes `build_match_context.py` to get a normalized JSON context, and produces a structured report with probabilistic language.
 
 **Architecture shift:** The model no longer calls FlashScore endpoints directly for match data. It uses MCP only for match discovery, and delegates all data gathering to `build_match_context.py`, which returns a single normalized `final_context` JSON.
 
@@ -139,16 +139,14 @@ Use this skill when:
 
 - The user requests analysis of a specific football match
 - The query includes teams, date, and optionally the competition
-- Pre-match context, form, players, indicators, and recommendations are needed
-- The match has not started yet
+- The match can be `notstarted`, `inprogress`, or `finished`
 
 ## When NOT To Use
 
 Do not use this skill when:
 
-- The match status is `inprogress` or `finished` → respond: "That match already started/finished. Wait for an upcoming one."
-- The query is about a tournament or team without a specific match → not applicable. Offer to search for upcoming matches of that team.
-- The user asks for in-play analysis → this skill is pre-match only.
+- The query is about a tournament or team without a specific match → not applicable. Offer to search for recent or upcoming matches of that team.
+- The `final_context` could not be generated.
 
 ## Installation
 

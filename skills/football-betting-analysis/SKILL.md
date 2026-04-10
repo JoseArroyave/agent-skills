@@ -1,21 +1,22 @@
 ---
 name: football-betting-analysis
 description: >
-  Análisis pre-partido de fútbol en 8 capas. Recibe una consulta en lenguaje
-  natural, descubre el partido en FlashScore MCP, ejecuta build_match_context.py
-  para obtener un contexto normalizado en JSON, y produce un informe estructurado
-  con lenguaje probabilístico. No inventa datos, no analiza partidos en curso
-  ni finalizados, no suple la predicción con modelos heurísticos.
+  Análisis de partidos de fútbol en 8 capas, en tres modos: pre-partido,
+  en vivo y post-partido. Recibe una consulta en lenguaje natural, descubre
+  el partido en FlashScore MCP, ejecuta build_match_context.py para obtener
+  un contexto normalizado en JSON, y produce un informe estructurado con
+  lenguaje probabilístico. No inventa datos, no suple la predicción con
+  modelos heurísticos.
 ---
 
 # Football Betting Analysis
 
 ## 1. Overview
 
-Análisis pre-partido de fútbol en 8 capas. Recibe una consulta en lenguaje
-natural, descubre el partido en FlashScore MCP, ejecuta el script de preprocesamiento
-`build_match_context.py` para obtener un contexto JSON normalizado, y produce un
-informe estructurado con lenguaje probabilístico.
+Análisis de partidos de fútbol en tres modos: pre-partido, en vivo y post-partido.
+Recibe una consulta en lenguaje natural, descubre el partido en FlashScore MCP,
+ejecuta el script de preprocesamiento `build_match_context.py` para obtener un
+contexto JSON normalizado, y produce un informe estructurado con lenguaje probabilístico.
 
 El modelo no llama endpoints directamente (salvo para match discovery).
 Recibe datos ya limpios, normalizados y consolidados en `final_context`.
@@ -31,15 +32,12 @@ Nunca: "va a ganar", "es fijo", "el over entra seguro".
 ### Usar cuando:
 
 - El usuario pide análisis de un partido específico de fútbol.
-- La consulta incluye equipos, fecha y (opcionalmente) competición.
-- Se necesita contexto, forma, jugadores, indicadores y recomendaciones.
+- El partido puede estar `notstarted`, `inprogress` o `finished`.
 
 ### No usar cuando:
 
-- El partido está `finished` → responder: "Ese partido ya terminó.
-  ¿Querés que analice el partido finalizado?"
-- La consulta es sobre un torneo o equipo sin partido específico → no
-  procede. Se puede ofrecer buscar próximos partidos de ese equipo.
+- La consulta es sobre un torneo o equipo sin partido específico → no procede. Se puede ofrecer buscar partidos recientes o próximos de ese equipo.
+- `final_context` no pudo generarse.
 
 **Nota arquitectónica:** Esta versión no dispone de predicción basada en modelos
 de aprendizaje. Por diseño, la capa predictiva es odds-driven — las probabilidades
@@ -101,7 +99,8 @@ De la consulta en lenguaje natural extraer:
   away_team:  string,       // equipo mencionado segundo (o null si solo uno)
   date_from:  ISO 8601,    // fecha inicio del rango
   date_to:    ISO 8601,    // fecha fin del rango
-  league:     string|null   // competición mencionada (o null)
+  league:     string|null,  // competición mencionada (o null)
+  analysis_mode: "prematch" | "live" | "postmatch"  // derivado de status del evento
 }
 ```
 
@@ -117,6 +116,10 @@ De la consulta en lenguaje natural extraer:
 | Nombres con acento ("Atletico", "Inter")          | Normalizar quitando acentos antes de buscar                   |
 | Nombres parciales ("Barça", "Atleti")             | Fuzzy match contra `home_team`/`away_team` del resultado      |
 | Competición mencionada ("la league", "champions") | Filtrar por `league_id` tras buscar                           |
+
+| `status = "notstarted"` | `analysis_mode = "prematch"` |
+| `status = "inprogress"` | `analysis_mode = "live"` |
+| `status = "finished"` | `analysis_mode = "postmatch"` |
 
 **Si solo un equipo matchea pero hay múltiples candidatos del rival:**
 → Clarificación obligatoria. Preguntar: "¿Buscás el [equipo] vs [candidato A] o vs [candidato B]?"
@@ -195,10 +198,10 @@ De la consulta en lenguaje natural extraer:
 **Paso 5 — Verificación y extracción:**
 
 ```
-16. Verificar estado del evento:
-    → status = "notstarted" → proceed.
-    → status = "inprogress" → proceed (análisis en vivo disponible).
-    → status = "finished": "Ese partido ya terminó. ¿Querés que analice el partido finalizado?"
+16. Verificar estado del evento y asignar analysis_mode:
+    → status = "notstarted" → analysis_mode = "prematch" → proceed
+    → status = "inprogress" → analysis_mode = "live" → proceed
+    → status = "finished"  → analysis_mode = "postmatch" → proceed
 17. Extraer IDs:
     → event_id = del evento encontrado
     → home_team_id = del equipo local
@@ -338,7 +341,7 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     goals_home, goals_away,
     warnings: string[] | null
   },
-  "commentary": [{ minutes, description }] (primeras 5 entradas) | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
+  "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
   "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
   "standings": {
     teams: { [team_id]: { position, name, points, wins, draws, losses, goals, goal_difference } },
@@ -431,6 +434,18 @@ Mercado vs datos: [alineados/parcialmente alineados/en conflicto] — [explicaci
 - Si no hay odds → no usar diff mercado vs indicadores. Usar solo odds si disponibles.
 - Si neither → capa 1 muy degradada.
 
+**Output para `postmatch`:**
+
+```
+Mercado esperaba [ODDS]:
+- [Home]: [prob]% | Draw: [prob]% | [Away]: [prob]%
+- Over 2.5: [cuota] → prob implícita [prob]%
+- BTTS: [cuota] → prob implícita [prob]%
+
+Resultado vs expectativa [ODDS]/[IND]:
+- El resultado [fue alineado / parcialmente alineado / sorpresivo] con las probabilidades del mercado
+```
+
 ---
 
 ### Capa 2 — Descriptiva de Equipos
@@ -476,6 +491,9 @@ Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
 [Para notstarted]: Previa del partido [IND]: [texto de previa de FlashScore — si no disponible: "Previa no disponible [N/A]"]
 [Para inprogress]: Eventos recientes: [resumen de últimos eventos del partido — de summary.events]
 [Para finished]: Resultado final: [home] [H] - [A] [away] | [marcador final]
+[Para postmatch — analysis_mode = "postmatch"]:
+  El resultado [confirma/rompe] la tendencia reciente de cada equipo
+  Resultado vs forma: [el partido fue consistente/inconsistente con la forma previa]
 ```
 
 **Degradación:**
@@ -486,6 +504,7 @@ Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
 - Si `preview` no disponible → texto "Previa no disponible [N/A]".
 - Si status = inprogress → usar "Lo que Está Pasando" con marcador y minuto actual.
 - Si status = finished → usar "Lo Que Pasó" con resultado final.
+- Si `analysis_mode = "postmatch"`: incluir comparación de resultado vs forma previa y vs odds pre-partido.
 
 ---
 
@@ -626,6 +645,7 @@ Patrón de estilo: [N/A] — dato observacional no respaldado por stats.
 - Si no hay player-stats NI missingPlayers → "Sin datos disponibles de protagonistas [N/A] — capa degradada." No inventar jugadores ni ausencias.
 - Si solo hay missingPlayers (Carril B) → capa Carril A = N/A; Carril B según niveles de ausencia definidos arriba.
 - Si hay ambos → usar Carril A y añadir Carril B como enriquecimiento.
+- Si `analysis_mode = "postmatch"`: `player_stats` como fuente principal, `summary.events` como fuente secundaria, `commentary` como apoyo terciario — solo para describir secuencias, nunca para inventar superioridad estructural. Si no hay `player_stats` pero sí `summary.events` → basarse en eventos para describir el desarrollo.
 
 ---
 
@@ -736,6 +756,7 @@ Análisis en vivo: El marcador [X-X] [refleja/no refleja] lo que muestran las st
 
 - Si no hay stats → omitir evaluación de sobre/sub-rendimiento.
 - Si no hay forma → "Datos insuficientes para diagnóstico de tendencia [N/A]."
+- Si `analysis_mode = "postmatch"`: el foco cambia de "qué podría pasar" a "qué pasó y por qué". Incluir contradicciones entre expectativa previa y desarrollo real.
 
 ---
 
@@ -779,6 +800,7 @@ Outliers:
 **Degradación:**
 
 - Si Capa 4 no está disponible → señales no utilizables.
+- Si `analysis_mode = "postmatch"`: el foco cambia de "qué podría pasar" a "qué pasó y por qué". Incluir contradicciones entre expectativa previa y desarrollo real.
 
 ---
 
@@ -870,10 +892,52 @@ disponible."
 
 - Si Capa 7 es muy baja confianza → Capa 8 se reduce a "Señales más
   fuertes" (sin recomendación de mercados).
+- Si `analysis_mode = "postmatch"`: el foco cambia de "qué podría pasar" a "qué pasó y por qué". Incluir contradicciones entre expectativa previa y desarrollo real.
 
 ---
 
-## 6. Política de Confianza
+## 9. Sección Post-Partido — Lo Que Pasó
+
+**Obligatoria solo cuando `analysis_mode = "postmatch"`.**
+
+**Inputs:** `match.scores`, `summary.events`, `match_stats`, `commentary`, `odds`/`implied_probs`
+
+**Output obligatorio:**
+
+```
+## 9. Lo Que Pasó
+
+Resultado final [API]: [home] [H] - [A] [away]
+
+Desarrollo del partido [IND]:
+- Inicio: [quién pegó primero / si el primer tiempo marcó tendencia]
+- Punto de giro: [penal, roja, empate, cambio de dominio, etc. — solo si existe evidencia en summary.events o commentary]
+- Tramo final: [presión, control, reacción, sostén]
+
+Lectura estadística [API]/[IND]:
+- Tiros: [home] - [away]
+- Tiros a puerta: [home] - [away]
+- Posesión: [home]% - [away]%
+- Corners: [home] - [away]
+- xG: [home] - [away] (solo si existe en match_stats)
+- Disciplina: tarjetas [home] - [away]
+
+Mercado vs resultado [ODDS]/[IND]:
+- El mercado esperaba: [resumen de probabilidades pre-partido]
+- El resultado final fue: [alineado / parcialmente alineado / sorpresivo] con esas probabilidades
+
+Conclusión post-partido [IND]:
+- Qué confirmó del análisis pre-partido
+- Qué contradijo
+- Qué deja como señal hacia próximos partidos
+
+[Si datos insuficientes para lectura completa, agregar:]
+Lectura parcial del desarrollo: algunos datos no estuvieron disponibles para una lectura completa. Datos faltantes: [listar cuáles].
+```
+
+---
+
+## 10. Política de Confianza
 
 ### Confianza global
 
@@ -905,7 +969,7 @@ Cada capa puede marcarse como:
 
 ---
 
-## 7. Anti-Racionalizaciones
+## 11. Anti-Racionalizaciones
 
 Esta es la sección de guardrails. Es de cumplimiento **obligatorio**.
 Todo lo que sigue **no se puede hacer**, sin excepción:
@@ -952,11 +1016,19 @@ Todo lo que sigue **no se puede hacer**, sin excepción:
 - `Get_Team_Fixtures` / `Get_Team_Results` es la vía de match discovery.
   No existe `/api/events/?team=X`.
 - Para partidos `inprogress`: análisis en vivo disponible — usar datos actuales del partido.
-- Para partidos `finished`: consultar al usuario si quiere análisis del partido finalizado.
+- Para partidos `finished`: `analysis_mode = "postmatch"` → proceed con análisis post-partido.
+
+**Reglas para `postmatch`:**
+
+- No inventar causas. Commentary sirve para describir secuencias y momentos, no para inventar superioridad estructural.
+- Si no hay `match_stats` → limitarse a resultado + eventos + forma + odds previas.
+- Si no hay `summary.events` → no hablar de "punto de quiebre" (la output format ya filtra: "solo si existe evidencia en summary.events o commentary").
+- Si los datos son insuficientes para una lectura completa → usar la etiqueta "Lectura parcial del desarrollo" y listar qué datos no estuvieron disponibles.
+- Commentary es dato observacional, no señal principal. Solo válido si coincide con indicadores de otras capas.
 
 ---
 
-## 8. Formato de Salida del Análisis
+## 12. Formato de Salida del Análisis
 
 **Estructura obligatoria (en este orden exacto):**
 
@@ -998,13 +1070,14 @@ Confianza global: [muy baja/baja/media/media-alta/alta]
 
 ---
 
-## 9. Quick Reference
+## 13. Quick Reference
 
 ```
 CONSULTA NL → parsing → { home, away, date_from, date_to, league? }
 
 Fase 1 (MCP directo):
   Match discovery:   livesport search API → /data/main_teams.csv (fallback) → Get_Team_Fixtures → Get_Team_Results
+  → analysis_mode = prematch | live | postmatch
   → Extraer: event_id, home_team_id, away_team_id
 
 Fase 2 (build_match_context.py):
@@ -1030,7 +1103,7 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 
 ---
 
-## 10. Agujeros Cerrados
+## 14. Agujeros Cerrados
 
 | Racionalización                                                                                | Contramedida                                                                                                                                               |
 | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1038,7 +1111,7 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 | "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 Carril B: usar `missingPlayers` de `Get_Match_Lineups` si existe. Si no hay nada → [N/A].                                            |
 | "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                                                           |
 | "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee.                                            |
-| "El partido ya empezó pero el análisis salió igual"                                            | **No prohibido.** Si status = inprogress → análisis en vivo disponible. Si finished → consultar si quiere análisis del partido finalizado.                 |
+| "El partido ya empezó pero el análisis salió igual"                                            | **No prohibido.** Si status = inprogress → análisis en vivo disponible. Si finished → analysis_mode = "postmatch" → proceed con análisis post-partido.                 |
 | "No había injuries data así que inventé lesionados"                                            | **Prohibido.** Si `missingPlayers` no está disponible → no inventar ausencia ni motivo.                                                                    |
 | "Calculé cuánto baja el equipo por cada ausente"                                               | **Prohibido.** No estimar impacto numérico de ausencias. Usar solo lo que la API provee + niveles de ausencia definidos.                                   |
 | "Usé missingPlayers como señal fuerte por sí sola"                                             | **Prohibido.** Ausencias sin corroboración en otras capas = señal débil. Nunca señal fuerte.                                                               |
