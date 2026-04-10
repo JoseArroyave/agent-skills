@@ -11,6 +11,7 @@ Usage:
     python build_match_context.py <event_id> <home_team_id> <away_team_id>
 """
 
+import os
 import sys
 import json
 import requests
@@ -26,7 +27,12 @@ from datetime import datetime
 # =============================================================================
 
 def load_rapidapi_key() -> str:
-    """Load RAPIDAPI_KEY from settings files, or return empty string if not found."""
+    # 1. Environment variable (works in any agent/environment)
+    env_key = os.environ.get("RAPIDAPI_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    # 2. Claude settings files (default for Claude Code users)
     settings_paths = [
         Path.home() / ".claude" / "settings.json",
         Path.home() / ".claude" / "settings.local.json",
@@ -40,6 +46,16 @@ def load_rapidapi_key() -> str:
                         return data["RAPIDAPI_KEY"]
             except Exception:
                 pass
+
+    # 3. Local .rapidapi_key file in the script's directory (fallback for other agents)
+    script_dir = Path(__file__).parent
+    local_key_file = script_dir / ".rapidapi_key"
+    if local_key_file.exists():
+        try:
+            return local_key_file.read_text().strip()
+        except Exception:
+            pass
+
     return ""
 
 RAPIDAPI_KEY = load_rapidapi_key()

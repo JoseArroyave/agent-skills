@@ -133,7 +133,7 @@ De la consulta en lenguaje natural extraer:
 4. Retorna: team_id, name, url, country, country_id
    → Si 1 resultado: proceed con ese team_id
    → Si >1 resultado: clarificación obligatoria ("¿Buscás [equipo A] o [equipo B]?")
-   → Si 0 resultados: ir a paso 5 (fallback a teams.csv)
+   → Si 0 resultados: ir a paso 5 (fallback a /data/main_teams.csv)
 ```
 
 **Normalización para la API de búsqueda:**
@@ -143,19 +143,19 @@ De la consulta en lenguaje natural extraer:
 - Quitar puntos: "Atl." → "Atl"
 - Quitar espacios extra
 
-**Paso 2 — Lookup de equipos en /data/teams.csv (fallback):**
+**Paso 2 — Lookup de equipos en /data/main_teams.csv (fallback):**
 
 ```
-5. Si no se encontró el equipo en la API, buscar en /data/teams.csv:
+5. Si no se encontró el equipo en la API, buscar en /data/main_teams.csv:
    Normalizar nombres (mismas reglas que arriba)
-6. Buscar match exacto en /data/teams.csv después de normalizar
+6. Buscar match exacto en /data/main_teams.csv después de normalizar
    → Si 1 resultado: proceed
    → Si >1 resultado: clarificación obligatoria
 7. Si 0 resultados exactos: intentar substring match
    → Si 1 resultado: proceed
    → Si >1 resultado: clarificación obligatoria
 8. Si 0 resultados: buscar coincidencias cercanas (similitud string)
-   → Calcular similaridad entre nombre buscado y todos los nombres en /data/teams.csv
+   → Calcular similaridad entre nombre buscado y todos los nombres en /data/main_teams.csv
    → Si hay candidatos con similitud ≥ umbral (ej: Levenshtein ratio ≥ 0.6):
       → Si 1 candidato cercano: "¿Quisiste decir [nombre]?"
       → Si >1 candidatos: mostrar top 3: "¿Buscás alguno de estos? [A], [B], [C]"
@@ -1004,7 +1004,7 @@ Confianza global: [muy baja/baja/media/media-alta/alta]
 CONSULTA NL → parsing → { home, away, date_from, date_to, league? }
 
 Fase 1 (MCP directo):
-  Match discovery:   livesport search API → /data/teams.csv (fallback) → Get_Team_Fixtures → Get_Team_Results
+  Match discovery:   livesport search API → /data/main_teams.csv (fallback) → Get_Team_Fixtures → Get_Team_Results
   → Extraer: event_id, home_team_id, away_team_id
 
 Fase 2 (build_match_context.py):

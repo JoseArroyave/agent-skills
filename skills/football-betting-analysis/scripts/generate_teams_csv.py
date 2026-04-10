@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 import json
 import time
@@ -14,6 +15,12 @@ from urllib3.util.retry import Retry
 # =============================================================================
 
 def load_rapidapi_key() -> str:
+    # 1. Environment variable (works in any agent/environment)
+    env_key = os.environ.get("RAPIDAPI_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    # 2. Claude settings files (default for Claude Code users)
     settings_paths = [
         Path.home() / ".claude" / "settings.json",
         Path.home() / ".claude" / "settings.local.json",
@@ -27,6 +34,16 @@ def load_rapidapi_key() -> str:
                         return data["RAPIDAPI_KEY"]
             except Exception:
                 pass
+
+    # 3. Local .rapidapi_key file in the script's directory (fallback for other agents)
+    script_dir = Path(__file__).parent
+    local_key_file = script_dir / ".rapidapi_key"
+    if local_key_file.exists():
+        try:
+            return local_key_file.read_text().strip()
+        except Exception:
+            pass
+
     return ""
 
 RAPIDAPI_KEY = load_rapidapi_key()
@@ -479,9 +496,10 @@ if __name__ == "__main__":
     teams_csv = "main_teams.csv"
 
     SCRIPT_DIR = Path(__file__).parent
-    tournaments_csv = SCRIPT_DIR / tournaments_csv
-    failed_csv = SCRIPT_DIR / failed_csv
-    teams_csv = SCRIPT_DIR / teams_csv
+    DATA_DIR = SCRIPT_DIR / "../data"
+    tournaments_csv = DATA_DIR / tournaments_csv
+    failed_csv = DATA_DIR / failed_csv
+    teams_csv = DATA_DIR / teams_csv
     
     if USE_FAILED_CSV:
         print("[MODE] RETRY FROM CSV")
