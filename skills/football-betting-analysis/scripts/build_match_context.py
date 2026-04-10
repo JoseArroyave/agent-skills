@@ -1456,7 +1456,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "lineups": {},
         "summary": {},
         "preview": {},  # string o null — web scraping de FlashScore preview
-        "commentary": None,
+        "commentary": {},
         "standings": {},
         "overunder_standings": {},
         "form_standings": {},
@@ -1581,8 +1581,6 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     # -------------------------------------------------------------------------
     # 9. COMMENTARY (minute-by-minute live commentary — solo para partidos inprogress/finished, no para notstarted)
     # -------------------------------------------------------------------------
-    final["commentary"] = []
-    
     if final["match"]["status"] == "notstarted":
         final["commentary"] = {"warnings": ["Commentary not available for matches that have not started [N/A]"]}
     else:
