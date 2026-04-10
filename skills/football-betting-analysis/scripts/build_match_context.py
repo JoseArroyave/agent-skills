@@ -292,7 +292,6 @@ def fetch_preview(home_slug: Dict, away_slug: Dict, event_id: str) -> Optional[s
     for url in candidate_urls:
         try:
             resp = requests.get(url, headers=headers, timeout=15)
-            print(f"[INFO] Fetching preview from {url} - Status code: {resp.status_code}")
             resp.raise_for_status()
 
             # 1) Try DOM
@@ -300,7 +299,6 @@ def fetch_preview(home_slug: Dict, away_slug: Dict, event_id: str) -> Optional[s
             if preview:
                 cleaned = clean_preview(preview)
                 if cleaned:
-                    print(f"[INFO] Preview found in DOM using URL: {url}")
                     return cleaned
 
             # 2) Try embedded eventPreview.contentParsed
@@ -308,15 +306,11 @@ def fetch_preview(home_slug: Dict, away_slug: Dict, event_id: str) -> Optional[s
             if preview:
                 cleaned = clean_preview(preview)
                 if cleaned:
-                    print(f"[INFO] Preview found in contentParsed using URL: {url}")
                     return cleaned
-
-            print(f"[INFO] No preview found in URL: {url}")
 
         except Exception as e:
             print(f"[WARNING] Preview scrape failed for {event_id} in {url}: {e}", file=sys.stderr)
 
-    print(f"[INFO] Preview block not found for event {event_id}")
     return None
 
 def fetch_tournament_standings(tournament_id: str, tournament_stage_id: str, stype: str = "overall") -> Optional[List]:
@@ -540,7 +534,7 @@ def normalize_h2h(h2h_data: List) -> Dict:
     return {
         "records": records,
         "summary": summary,
-        "warnings": warnings if warnings else None,
+        "warnings": [] if not warnings else warnings,
     }
 
 
@@ -654,7 +648,7 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
     return {
         "records": records,
         "summary": summary,
-        "warnings": None,
+        "warnings": [],
     }
 
 
@@ -763,7 +757,7 @@ def normalize_team_results(team_results_data: Dict, team_name: str, team_id: str
             "over_25_freq": f"{over_count}/{n}" if n > 0 else None,
             "btts_freq": f"{btts_count}/{n}" if n > 0 else None,
         },
-        "warnings": None,
+        "warnings": [],
     }
 
     # Home / away split
@@ -936,7 +930,7 @@ def normalize_match_stats(stats_data: Any, home_team_name: str, away_team_name: 
         normalized.append(rec)
         stat_dict[name] = rec
 
-    result: Dict[str, Any] = {"stats": normalized, "warnings": None}
+    result: Dict[str, Any] = {"stats": normalized, "warnings": []}
 
     def get_num(name: str, side: str) -> Optional[float]:
         s = stat_dict.get(name)
@@ -1037,7 +1031,7 @@ def normalize_player_stats(player_data: Any, home_team_id: str, away_team_id: st
         "top_shots_away": top_by_metric(away_players, "shots"),
         "top_key_passes_home": top_by_metric(home_players, "key_passes"),
         "top_key_passes_away": top_by_metric(away_players, "key_passes"),
-        "warnings": None,
+        "warnings": [],
     }
 
 
@@ -1048,7 +1042,7 @@ def normalize_lineups(lineup_data: Any, home_team_id: str, away_team_id: str) ->
     if not lineup_data:
         return {"home": None, "away": None, "warnings": ["Lineup data not available [N/A]"]}
 
-    result = {"home": None, "away": None, "warnings": None}
+    result = {"home": None, "away": None, "warnings": []}
 
     for team_block in lineup_data:
         side = team_block.get("side")
@@ -1088,13 +1082,74 @@ def normalize_lineups(lineup_data: Any, home_team_id: str, away_team_id: str) ->
     return result
 
 
+def detect_event_type(players: List[Dict], description: str = "") -> str:
+    """
+    Detect normalized event type from players/types/description.
+    Returns one of:
+    - goal
+    - own_goal
+    - penalty_goal
+    - missed_penalty
+    - yellow_card
+    - red_card
+    - second_yellow_red
+    - substitution
+    - var
+    - unknown
+    """
+    desc_l = (description or "").lower()
+    player_types = [str(p.get("type", "")).lower() for p in players]
+
+    # Priority matters
+    for t in player_types:
+        if "substitution" in t:
+            return "substitution"
+        if "second yellow" in t:
+            return "second_yellow_red"
+        if "red" in t:
+            return "red_card"
+        if "yellow" in t:
+            return "yellow_card"
+        if "own goal" in t:
+            return "own_goal"
+        if "missed penalty" in t or "penalty missed" in t:
+            return "missed_penalty"
+        if "penalty" in t and "goal" in t:
+            return "penalty_goal"
+        if "goal" in t:
+            return "goal"
+        if "var" in t:
+            return "var"
+
+    # Fallback with description
+    if "substitution" in desc_l:
+        return "substitution"
+    if "second yellow" in desc_l:
+        return "second_yellow_red"
+    if "red" in desc_l:
+        return "red_card"
+    if "yellow" in desc_l:
+        return "yellow_card"
+    if "own goal" in desc_l:
+        return "own_goal"
+    if "missed penalty" in desc_l or "penalty missed" in desc_l:
+        return "missed_penalty"
+    if "penalty" in desc_l and "goal" in desc_l:
+        return "penalty_goal"
+    if "goal" in desc_l:
+        return "goal"
+    if "var" in desc_l:
+        return "var"
+
+    return "unknown"
+
 def normalize_summary(summary_data: Any) -> Dict:
     """
-    Normalize match summary (goals, cards, key events).
-    Aggregate events by type and team.
+    Normalize match summary including all events:
+    goals, cards, substitutions, VAR, penalties, etc.
     """
     if not summary_data:
-        return {"events": [], "goals_home": 0, "goals_away": 0, "warnings": None}
+        return {"events": [], "goals_home": 0, "goals_away": 0, "warnings": []}
 
     events = []
     goals_home, goals_away = 0, 0
@@ -1102,24 +1157,19 @@ def normalize_summary(summary_data: Any) -> Dict:
     for evt in summary_data:
         minutes = evt.get("minutes")
         team = evt.get("team")
-        desc = evt.get("description", "")
-        players = evt.get("players", [])
+        desc = evt.get("description", "") or ""
+        players = evt.get("players", []) or []
 
-        event_type = None
-        for p in players:
-            t = p.get("type", "")
-            if "goal" in t.lower() or "penalty" in t.lower():
-                event_type = "goal"
-            elif "yellow" in t.lower():
-                event_type = "yellow_card"
-            elif "red" in t.lower():
-                event_type = "red_card"
+        event_type = detect_event_type(players, desc)
 
-        if team == "home":
-            if event_type == "goal":
+        # Count scoreboard goals only
+        # Normally own goals still count to scoreboard, but the API team field
+        # usually indicates the side associated with the event. If later you detect
+        # own-goal semantics differently, you can adjust this rule.
+        if event_type in {"goal", "penalty_goal", "own_goal"}:
+            if team == "home":
                 goals_home += 1
-        elif team == "away":
-            if event_type == "goal":
+            elif team == "away":
                 goals_away += 1
 
         events.append({
@@ -1127,15 +1177,21 @@ def normalize_summary(summary_data: Any) -> Dict:
             "team": team,
             "type": event_type,
             "description": desc,
+            "players": [
+                {
+                    "name": p.get("name"),
+                    "type": p.get("type"),
+                }
+                for p in players
+            ]
         })
 
     return {
         "events": events,
         "goals_home": goals_home,
         "goals_away": goals_away,
-        "warnings": None,
+        "warnings": [],
     }
-
 
 def normalize_standings(standings_data: List, team_ids: set) -> Dict:
     """
@@ -1167,7 +1223,7 @@ def normalize_standings(standings_data: List, team_ids: set) -> Dict:
         if tid in teams and teams[tid]:
             teams[tid]["position"] = idx + 1
 
-    return {"teams": teams, "warnings": None}
+    return {"teams": teams, "warnings": []}
 
 
 def normalize_overunder_st(ou_data: List, team_ids: set) -> Dict:
@@ -1186,7 +1242,7 @@ def normalize_overunder_st(ou_data: List, team_ids: set) -> Dict:
                 "under": row.get("under"),
                 "average_goals": row.get("average_goals_per_match"),
             }
-    return {"teams": teams, "warnings": None}
+    return {"teams": teams, "warnings": []}
 
 
 def normalize_form_st(form_data: List, team_ids: set) -> Dict:
@@ -1208,7 +1264,7 @@ def normalize_form_st(form_data: List, team_ids: set) -> Dict:
                 "goal_difference": row.get("goal_difference"),
                 "points": row.get("points"),
             }
-    return {"teams": teams, "warnings": None}
+    return {"teams": teams, "warnings": []}
 
 
 def normalize_top_scorers(scorers_data: List, team_ids: set) -> Dict:
@@ -1236,7 +1292,7 @@ def normalize_top_scorers(scorers_data: List, team_ids: set) -> Dict:
     return {
         "home_scorers": sorted(home_scorers, key=lambda x: x.get("goals", 0), reverse=True),
         "away_scorers": sorted(away_scorers, key=lambda x: x.get("goals", 0), reverse=True),
-        "warnings": None,
+        "warnings": [],
     }
 
 
@@ -1324,34 +1380,38 @@ def detect_h2h_inconsistencies(h2h: Dict) -> List[str]:
     return warnings
 
 
-def validate_data_completeness(ctx: Dict) -> List[str]:
+def validate_data_completeness(ctx: Dict) -> Dict[str, List[str]]:
     """
     Cross-check: do stats suggest one team is stronger but odds don't reflect?
-    Returns a list of warnings for the model.
+    Returns a dict with warnings categorized by section.
     """
-    warnings = []
+    result: Dict[str, List[str]] = {
+        "team_home_results": [],
+        "team_away_results": [],
+        "odds": [],
+    }
 
     odds = ctx.get("odds", {})
     team_h = ctx.get("team_home_results", {}).get("form", {})
     team_a = ctx.get("team_away_results", {}).get("form", {})
 
     # Check sample stability
-    for side, label in [("home", "Home"), ("away", "Away")]:
+    for side, label, key in [("home", "Home", "team_home_results"), ("away", "Away", "team_away_results")]:
         form = team_h if side == "home" else team_a
         n = form.get("last_n", 0)
         if n < 3:
-            warnings.append(f"{label} team form sample too small (N={n}) [IND]")
+            result[key].append(f"{label} team form sample too small (N={n}) [IND]")
 
     # Check if market is coherent with form
     prob_h = odds.get("prob_home")
     if prob_h and team_h.get("gf_avg") and team_a.get("gf_avg"):
         form_diff = team_h["gf_avg"] - team_a["gf_avg"]
         if form_diff > 0.5 and prob_h < 40:
-            warnings.append("Market undervaluing home team despite stronger recent form [IND]")
+            result["odds"].append("Market undervaluing home team despite stronger recent form [IND]")
         elif form_diff < -0.5 and prob_h > 60:
-            warnings.append("Market overvaluing home team despite weaker recent form [IND]")
+            result["odds"].append("Market overvaluing home team despite weaker recent form [IND]")
 
-    return warnings
+    return result
 
 
 # =============================================================================
@@ -1369,7 +1429,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
             "away_team_id": away_team_id,
             "generated_at": datetime.now().isoformat(),
         },
-        "match": None,
+        "match": {"warnings": []},
         "odds": {},
         "implied_probs": {},
         "h2h": {},
@@ -1387,7 +1447,6 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "top_scorers": {},
         "tournament_top_scorers": {},
         "indicators": {},
-        "warnings": [],
     }
 
     # -------------------------------------------------------------------------
@@ -1396,7 +1455,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     details = fetch_match_details(event_id)
 
     if not details:
-        final["warnings"].append("CRITICAL: Could not fetch match details. Analysis not viable.")
+        final["match"]["warnings"].append("CRITICAL: Could not fetch match details. Analysis not viable.")
         return final
 
     home_epid = details.get("home_team", {}).get("event_participant_id")
@@ -1423,6 +1482,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "datetime": datetime.fromtimestamp(match_timestamp).isoformat() if match_timestamp else None,
         "status": normalize_match_status(details.get("match_status")),
         "scores": details.get("scores"),
+        "warnings": [],
     }
 
     team_ids = {"home": home_team_id, "away": away_team_id}
@@ -1505,11 +1565,14 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     # -------------------------------------------------------------------------
     # 9. COMMENTARY (minute-by-minute live commentary — solo para partidos inprogress/finished, no para notstarted)
     # -------------------------------------------------------------------------
-    commentary_raw = fetch_match_commentary(event_id)
-    if commentary_raw:
-        final["commentary"] = commentary_raw[:5]  # first 5 entries as preview
+    final["commentary"] = []
+    
+    if final["match"]["status"] == "notstarted":
+        final["commentary"] = {"warnings": ["Commentary not available for matches that have not started [N/A]"]}
     else:
-        final["commentary"] = None
+        commentary_raw = fetch_match_commentary(event_id)
+        if commentary_raw:
+            final["commentary"] = commentary_raw
 
     # -------------------------------------------------------------------------
     # PREVIEW (web scraping)
@@ -1583,11 +1646,13 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
 
     # H2H inconsistencies
     h2h_warnings = detect_h2h_inconsistencies(final["h2h"])
-    final["warnings"].extend(h2h_warnings)
+    final["h2h"]["warnings"].extend(h2h_warnings)
 
     # Cross-check warnings
-    completeness_warnings = validate_data_completeness(final)
-    final["warnings"].extend(completeness_warnings)
+    completeness = validate_data_completeness(final)
+    final["team_home_results"]["warnings"].extend(completeness["team_home_results"])
+    final["team_away_results"]["warnings"].extend(completeness["team_away_results"])
+    final["odds"]["warnings"].extend(completeness["odds"])
 
     return final
 

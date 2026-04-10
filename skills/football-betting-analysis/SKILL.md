@@ -36,8 +36,8 @@ Nunca: "va a ganar", "es fijo", "el over entra seguro".
 
 ### No usar cuando:
 
-- El partido está `inprogress` o `finished` → responder: "Ese partido ya
-  comenzó / terminó. Esperá a uno próximo."
+- El partido está `finished` → responder: "Ese partido ya terminó.
+  ¿Querés que analice el partido finalizado?"
 - La consulta es sobre un torneo o equipo sin partido específico → no
   procede. Se puede ofrecer buscar próximos partidos de ese equipo.
 
@@ -123,17 +123,38 @@ De la consulta en lenguaje natural extraer:
 
 ### 4.2 Match Discovery (Fase 1 — SOLO esta fase usa MCP directamente)
 
-**Paso 1 — Lookup de equipos en /data/teams.csv:**
+**Paso 1 — Búsqueda por API de búsqueda de equipos:**
 
 ```
 1. Normalizar nombres de ambos equipos (minúsculas, sin acentos, sin puntos)
-2. Buscar match exacto en /data/teams.csv después de normalizar
+2. Usar la API de búsqueda:
+   GET https://s.livesport.services/api/v2/search/?q=<query>&lang-id=13&type-ids=1,2,3,4&project-id=202&project-type-id=1
+3. Filtrar resultados: sport.id=1 (fútbol), type.id=2 (Team)
+4. Retorna: team_id, name, url, country, country_id
    → Si 1 resultado: proceed con ese team_id
    → Si >1 resultado: clarificación obligatoria ("¿Buscás [equipo A] o [equipo B]?")
-3. Si 0 resultados exactos: intentar substring match
+   → Si 0 resultados: ir a paso 5 (fallback a teams.csv)
+```
+
+**Normalización para la API de búsqueda:**
+
+- Minúsculas
+- Quitar acentos: á→a, é→e, í→i, ó→o, ú→u
+- Quitar puntos: "Atl." → "Atl"
+- Quitar espacios extra
+
+**Paso 2 — Lookup de equipos en /data/teams.csv (fallback):**
+
+```
+5. Si no se encontró el equipo en la API, buscar en /data/teams.csv:
+   Normalizar nombres (mismas reglas que arriba)
+6. Buscar match exacto en /data/teams.csv después de normalizar
    → Si 1 resultado: proceed
    → Si >1 resultado: clarificación obligatoria
-4. Si 0 resultados: buscar coincidencias cercanas (similitud string)
+7. Si 0 resultados exactos: intentar substring match
+   → Si 1 resultado: proceed
+   → Si >1 resultado: clarificación obligatoria
+8. Si 0 resultados: buscar coincidencias cercanas (similitud string)
    → Calcular similaridad entre nombre buscado y todos los nombres en /data/teams.csv
    → Si hay candidatos con similitud ≥ umbral (ej: Levenshtein ratio ≥ 0.6):
       → Si 1 candidato cercano: "¿Quisiste decir [nombre]?"
@@ -141,54 +162,47 @@ De la consulta en lenguaje natural extraer:
    → Si ningún candidato cercano: "No encontré '[equipo]'. Verificá el nombre."
 ```
 
-**Normalización para /data/teams.csv:**
-
-- Minúsculas
-- Quitar acentos: á→a, é→e, í→i, ó→o, ú→u
-- Quitar puntos: "Atl." → "Atl"
-- Quitar espacios extra
-
-**Sugerencia de близкие candidatos:**
+**Sugerencia de candidatos cercanos:**
 
 - Umbral de similaridad: ratio ≥ 0.6 (Levenshtein o similar)
 - Mostrar máximo 3 candidatos ordenados por similaridad descendente
 - Incluir el nombre original del CSV (sin normalizar) en la sugerencia
 
-**Paso 2 — Búsqueda por overlap en fixtures:**
+**Paso 3 — Búsqueda por overlap en fixtures:**
 
 ```
-3. Get_Team_Fixtures(team_id_home, page=1)
-   → Get_Team_Fixtures(team_id_away, page=1)
-4. Filtrar fixtures del rango date_from..date_to
-5. Buscar partido donde home_team_id o away_team_id de un fixture
-   coincida con el team_id del otro equipo (overlap)
-   → Si 1 resultado: proceed
-   → Si >1 resultado: priorizar por fecha más cercana al rango solicitado
-   → Si 0: ir a paso 6
+ 9. Get_Team_Fixtures(team_id_home, page=1)
+10. Get_Team_Fixtures(team_id_away, page=1)
+11. Filtrar fixtures del rango date_from..date_to
+12. Buscar partido donde home_team_id o away_team_id de un fixture
+    coincida con el team_id del otro equipo (overlap)
+    → Si 1 resultado: proceed
+    → Si >1 resultado: priorizar por fecha más cercana al rango solicitado
+    → Si 0: ir a paso 4
 ```
 
-**Paso 3 — Fallback a results:**
+**Paso 4 — Fallback a results:**
 
 ```
-6. Get_Team_Results(team_id_home, page=1)
-   → Get_Team_Results(team_id_away, page=1)
-7. Buscar overlap (misma lógica que fixtures)
-   → Si 1 resultado: proceed
-   → Si >1: priorizar por fecha más cercana
-   → Si 0: "No encontré el partido [Home] vs [Away] en las fechas indicadas."
+13. Get_Team_Results(team_id_home, page=1)
+14. Get_Team_Results(team_id_away, page=1)
+15. Buscar overlap (misma lógica que fixtures)
+    → Si 1 resultado: proceed
+    → Si >1: priorizar por fecha más cercana
+    → Si 0: "No encontré el partido [Home] vs [Away] en las fechas indicadas."
 ```
 
-**Paso 4 — Verificación y extracción:**
+**Paso 5 — Verificación y extracción:**
 
 ```
-8. Verificar estado del evento:
-   → status = "notstarted" → proceed.
-   → status = "inprogress": "Ese partido ya está en juego."
-   → status = "finished":   "Ese partido ya terminó."
-9. Extraer IDs:
-   → event_id = del evento encontrado
-   → home_team_id = del equipo local
-   → away_team_id = del equipo visitante
+16. Verificar estado del evento:
+    → status = "notstarted" → proceed.
+    → status = "inprogress" → proceed (análisis en vivo disponible).
+    → status = "finished": "Ese partido ya terminó. ¿Querés que analice el partido finalizado?"
+17. Extraer IDs:
+    → event_id = del evento encontrado
+    → home_team_id = del equipo local
+    → away_team_id = del equipo visitante
 ```
 
 **Priorización cuando hay múltiples candidatos:**
@@ -240,7 +254,8 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       home_2nd_half, away_2nd_half,
       home_extra_time, away_extra_time,
       home_penalties, away_penalties
-    }
+    },
+    warnings: string[] | null
   },
   "odds": {
     available_markets: string[],
@@ -319,6 +334,7 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
   },
   "summary": {
     events: [{ minutes, team, type, description }],
+    type: goal | own_goal | penalty_goal | penalty_missed | substitution | var | yellow_card | red_card | second_yellow
     goals_home, goals_away,
     warnings: string[] | null
   },
@@ -355,7 +371,6 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       away: { n, stability }
     }
   },
-  "warnings": []
 }
 ```
 
@@ -420,7 +435,7 @@ Mercado vs datos: [alineados/parcialmente alineados/en conflicto] — [explicaci
 
 ### Capa 2 — Descriptiva de Equipos
 
-**Inputs:** `Get_Team_Results` (historial), `Get_Match_H2H`, `Get_Tournament_Standings` (si aplica).
+**Inputs:** `Get_Team_Results` (historial), `Get_Match_H2H`, `Get_Tournament_Standings` (si aplica), `final["preview"]` (web scraping — texto de previa del partido en FlashScore).
 
 **Cálculos:**
 
@@ -435,9 +450,14 @@ Mercado vs datos: [alineados/parcialmente alineados/en conflicto] — [explicaci
 **Output obligatorio:**
 
 ```
-## 2. Qué Viene Pasando
+## 2. [Qué Viene Pasando / Lo Que Está Pasando]
 
-[Home] [IND]:
+[Adaptar según estado del partido:]
+- status = notstarted → "Qué Viene Pasando"
+- status = inprogress → "Lo Que Está Pasando" + marcador actual + minuto
+- status = finished → "Lo Que Pasó"
+
+[Home] [IND] [marcador si inprogress]:
   Forma: [form_string] — [pts] pts / [N] pts posibles
   Goles: [gf_avg]/[gc_avg]
   Over 2.5: [X/N] | BTTS: [X/N] (si hay datos)
@@ -452,6 +472,10 @@ H2H [IND]: [X]PJ — [home_wins]V [draws]E [away_wins]D | avg goles [avg]
   [score reciente 2]
 
 Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
+
+[Para notstarted]: Previa del partido [IND]: [texto de previa de FlashScore — si no disponible: "Previa no disponible [N/A]"]
+[Para inprogress]: Eventos recientes: [resumen de últimos eventos del partido — de summary.events]
+[Para finished]: Resultado final: [home] [H] - [A] [away] | [marcador final]
 ```
 
 **Degradación:**
@@ -459,6 +483,9 @@ Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
 - Si `home_form` viene vacío → solo listar H2H disponible. Forma = N/A.
 - Si no hay H2H → omitir sección H2H.
 - Siempre incluir la nota si la muestra es N < 5.
+- Si `preview` no disponible → texto "Previa no disponible [N/A]".
+- Si status = inprogress → usar "Lo que Está Pasando" con marcador y minuto actual.
+- Si status = finished → usar "Lo Que Pasó" con resultado final.
 
 ---
 
@@ -649,7 +676,7 @@ Estabilidad muestra: [N] partidos / mínimo 5 — [suficiente/limitado]
 
 ### Capa 5 — Diagnóstica
 
-**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible — **solo para partidos inprogress/finished**).
+**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible — **solo para partidos inprogress/finished**), `match_stats` (stats actuales del partido).
 
 **Regla sobre commentary (solo para partidos inprogress/finished, no para notstarted):**
 
@@ -657,6 +684,12 @@ Estabilidad muestra: [N] partidos / mínimo 5 — [suficiente/limitado]
 - No usar commentary como señal principal.
 - No sobreinterpretar eventos aislados.
 - Si commentary describe un patrón no respaldado por stats → omitir o marcar como "dato observacional no concluyente".
+
+**[Para inprogress]:** Agregar evaluación de lo que está pasando en el partido vs lo esperado:
+
+- ¿El marcador refleja lo que muestran las stats? (xG, posesión, tiros)
+- ¿Algún equipo domina aunque no esté ganado?
+- ¿Eventos recientes cambiaron el partido?
 
 **Evaluar:**
 
@@ -666,11 +699,16 @@ Estabilidad muestra: [N] partidos / mínimo 5 — [suficiente/limitado]
 4. ¿Favorito del mercado tiene respaldo en indicadores?
 5. ¿Señales contradictorias?
 6. ¿El estilo de partido se identifica en commentary? (caos, dominio de esquinas, volumen de llegadas)
+7. **[Para inprogress]** ¿El partido hasta ahora confirma o contradice el análisis pre-partido?
 
 **Output obligatorio:**
 
 ```
-## 5. Por Qué Pasa
+## 5. [Por Qué Pasa / Qué Está Pasando]
+
+[Adaptar según estado:]
+- notstarted: "Por Qué Pasa" — análisis de tendencias pre-partido
+- inprogress: "Qué Está Pasando" — evaluación de lo que ocurre vs lo esperado + comparación con pre-match
 
 [Home]: [sobre/sub]-rendimiento — goles vs stats indica [explicación]
 [Causa de la tendencia]
@@ -687,6 +725,11 @@ Contradicciones:
 - [contradicción 2]
 
 ¿Sostenible? [sí/no] — [tendencia] → [sostenible/ruido]
+
+[Para inprogress:]
+Análisis en vivo: El marcador [X-X] [refleja/no refleja] lo que muestran las stats (xG: [xg_home]-[xg_away], posesión: [pos_home]%-[pos_away]%).
+[¿El equipo [X] domina aunque no esté ganando?]
+[¿Los últimos eventos cambiaron la dinámica?]
 ```
 
 **Degradación:**
@@ -756,15 +799,29 @@ Outliers:
 **Output obligatorio:**
 
 ```
-## 7. Qué Podría Pasar
+## 7. [Qué Podría Pasar / Qué Se Espera]
 
+[Adaptar según estado:]
+- notstarted: "Qué Podría Pasar" — predicción pre-partido
+- inprogress: "Qué Se Espera" — predicción actualizada con marcador actual y stats en vivo
+
+[Para notstarted:]
 Resultado: [Home] [X]% | Empate [Y]% | [Away] [Z]%
 Goles esperados: [Home] [X.XX] | [Away] [Y.XX] (basado en avg histórico)
 Over 1.5: [X]% | Over 2.5: [Y]% | BTTS: [Z]%
 Tipo: [cerrado/abierto/defensivo/competido]
 Confianza: [muy baja/baja/media/media-alta/alta] — [motivo de la calificación]
 
-Nota: "Predictiva basada en odds y stats históricas."
+[Para inprogress:]
+Marcador actual: [Home] [X] - [Y] [Away] — [minuto]'
+xG acumulado: [Home] [X.XX] | [Away] [Y.XX]
+Resultado esperado al final: [Home] [X] - [Y] [Away] (basado en xG y tiempo restante)
+Over 2.5: [X]% | BTTS: [Y]% (actualizado con datos inlive)
+Tipo de partido: [cerrado/abierto/defensivo/competido]
+Confianza: [muy baja/baja/media/media-alta/alta] — [motivo de la calificación]
+[¿El equipo que está perdiendo merece estar abajo?]
+
+Nota: "Predictiva basada en odds y stats históricas [y xG inlive para inprogress]."
 ```
 
 **Degradación:**
@@ -894,8 +951,8 @@ Todo lo que sigue **no se puede hacer**, sin excepción:
 
 - `Get_Team_Fixtures` / `Get_Team_Results` es la vía de match discovery.
   No existe `/api/events/?team=X`.
-- El estado de partido para pre-partido es `notstarted`. Si viene `inprogress` o
-  `finished` → no analizar.
+- Para partidos `inprogress`: análisis en vivo disponible — usar datos actuales del partido.
+- Para partidos `finished`: consultar al usuario si quiere análisis del partido finalizado.
 
 ---
 
@@ -947,7 +1004,7 @@ Confianza global: [muy baja/baja/media/media-alta/alta]
 CONSULTA NL → parsing → { home, away, date_from, date_to, league? }
 
 Fase 1 (MCP directo):
-  Match discovery:   /data/teams.csv → Get_Team_Fixtures → Get_Team_Results
+  Match discovery:   livesport search API → /data/teams.csv (fallback) → Get_Team_Fixtures → Get_Team_Results
   → Extraer: event_id, home_team_id, away_team_id
 
 Fase 2 (build_match_context.py):
@@ -981,7 +1038,7 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 | "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 Carril B: usar `missingPlayers` de `Get_Match_Lineups` si existe. Si no hay nada → [N/A].                                            |
 | "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                                                           |
 | "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee.                                            |
-| "El partido ya empezó pero el análisis salió igual"                                            | **Prohibido.** Si status = inprogress/finished → no analizar.                                                                                              |
+| "El partido ya empezó pero el análisis salió igual"                                            | **No prohibido.** Si status = inprogress → análisis en vivo disponible. Si finished → consultar si quiere análisis del partido finalizado.                 |
 | "No había injuries data así que inventé lesionados"                                            | **Prohibido.** Si `missingPlayers` no está disponible → no inventar ausencia ni motivo.                                                                    |
 | "Calculé cuánto baja el equipo por cada ausente"                                               | **Prohibido.** No estimar impacto numérico de ausencias. Usar solo lo que la API provee + niveles de ausencia definidos.                                   |
 | "Usé missingPlayers como señal fuerte por sí sola"                                             | **Prohibido.** Ausencias sin corroboración en otras capas = señal débil. Nunca señal fuerte.                                                               |
