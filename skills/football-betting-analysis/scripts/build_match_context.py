@@ -1051,7 +1051,7 @@ def normalize_player_stats(player_data: Any, home_team_id: str, away_team_id: st
     }
 
 
-def normalize_lineups(lineup_data: Any, home_team_id: str, away_team_id: str) -> Dict:
+def normalize_lineups(lineup_data: Any) -> Dict:
     """
     Normalize lineups + extract missingPlayers for each team.
     """
@@ -1059,36 +1059,44 @@ def normalize_lineups(lineup_data: Any, home_team_id: str, away_team_id: str) ->
         return {"home": None, "away": None, "warnings": ["Lineup data not available [N/A]"]}
 
     result = {"home": None, "away": None, "warnings": []}
+    
+    def parse_lineups(lineups: List, include_reason: bool = False) -> List[Dict]:
+        parsed = []
+        for m in lineups:
+            player_data = {
+                "country": m.get("country_name"),
+                "player_id": m.get("player_id"),
+                "name": m.get("name"),
+            }
+            if include_reason:
+                player_data["reason"] = m.get("reason")
+            parsed.append(player_data)
+        return parsed
 
     for team_block in lineup_data:
-        side = team_block.get("side")
+        unsureMissingPlayers = team_block.get("unsureMissingPlayers", [])
+        predictedLineups = team_block.get("predictedLineups", [])
+        startingLineups = team_block.get("startingLineups", [])
+        missingPlayers = team_block.get("missingPlayers", [])
         formation = team_block.get("predictedFormation")
-        players = team_block.get("predictedLineups", [])
-        missing = team_block.get("missingPlayers", [])
-        unsure = team_block.get("unsureMissingPlayers", [])
+        substitutes = team_block.get("substitutes", [])
+        side = team_block.get("side")
 
         team_data = {
+            "missing_players": parse_lineups(missingPlayers, True),
+            "predicted_lineups": [],
             "formation": formation,
-            "lineup_count": len(players),
-            "missing_players": [
-                {
-                    "name": m.get("name"),
-                    "player_id": m.get("player_id"),
-                    "reason": m.get("reason"),
-                    "country": m.get("country_name"),
-                }
-                for m in missing
-            ],
-            "unsure_missing": [
-                {
-                    "name": u.get("name"),
-                    "player_id": u.get("player_id"),
-                    "reason": u.get("reason"),
-                    "country": u.get("country_name"),
-                }
-                for u in unsure
-            ],
+            "starting_lineups": [],
+            "unsure_missing": [],
+            "substitutes": [],
         }
+        
+        if startingLineups:
+            team_data["starting_lineups"] = parse_lineups(startingLineups)
+            team_data["substitutes"] = parse_lineups(substitutes)
+        elif predictedLineups:
+            team_data["unsure_missing"] = parse_lineups(unsureMissingPlayers, True)
+            team_data["predicted_lineups"] = parse_lineups(predictedLineups)
 
         if side == "home":
             result["home"] = team_data
@@ -1565,7 +1573,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     # -------------------------------------------------------------------------
     lineup_raw = fetch_match_lineups(event_id)
     if lineup_raw:
-        final["lineups"] = normalize_lineups(lineup_raw, home_team_id, away_team_id)
+        final["lineups"] = normalize_lineups(lineup_raw)
     else:
         final["lineups"]["warnings"] = ["Lineup data not available [N/A]"]
 

@@ -70,11 +70,29 @@ porcentajes.
 
 | Qué no existe                                     | Consecuencia                                                                                                                                            |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Alineaciones confirmadas pre-partido              | El endpoint `Get_Match_Lineups` existe, pero las alineaciones confirmadas pueden no estar disponibles aún. Pueden venir vacías. No inventar alineación. |
+| Alineaciones confirmadas pre-partido              | El endpoint `Get_Match_Lineups` existe, pero las alineaciones confirmadas pueden no estar disponibles aún. Pueden venir vacías. No inventar alineación. Usar `predictedLineups` si está disponible — el script lo procesa automáticamente. |
 | Histórico de lesiones pre-existentes              | No existe en la API. No inventar.                                                                                                                       |
 | `missingPlayers` sin datos en `Get_Match_Lineups` | Si el endpoint no lo trae → no inventar motivo ni jugador.                                                                                              |
 
-**Nota:** `Get_Match_Lineups` puede aportar `missingPlayers` (nombre + motivo) incluso cuando las alineacionesConfirmed no existen. Usar ese dato cuando esté disponible.
+**Comportamiento de `normalize_lineups` en `build_match_context.py`:**
+
+El script procesa las alineaciones en dos niveles de prioridad:
+
+1. **Si `startingLineups` existe (alineaciones oficiales confirmadas):**
+   - `starting_lineups` — alineación titular confirmada [API]
+   - `missing_players` — jugadores ausentes con motivo [API]
+   - `substitutes` — sustitutos disponibles [API]
+   - `predicted_lineups` → vacío
+   - `unsure_missing` — vacío
+
+2. **Si `startingLineups` NO existe pero `predictedLineups` sí (alineación predicha/no confirmada):**
+   - `unsure_missing` — jugadores cuya ausencia no está confirmada [API]
+   - `missing_players` → jugadores ausentes con motivo [API]
+   - `predicted_lineups` — alineación predicha [API]
+   - `starting_lineups` → vacío
+   - `substitutes` → vacío
+
+**Nota:** `Get_Match_Lineups` puede aportar `missingPlayers` (nombre + motivo) incluso cuando las alineacionesConfirmadas no existen. Usar ese dato cuando esté disponible.
 
 **Fuente de cada señal en el análisis:**
 
@@ -331,8 +349,23 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     warnings: string[] | null
   },
   "lineups": {
-    home: { formation, lineup_count, missing_players: [{ name, player_id, reason, country }], unsure_missing: [...] },
-    away: { formation, lineup_count, missing_players: [...], unsure_missing: [...] },
+    home: {
+      formation,              // formación reportada (de predictedFormation)
+      lineup_count,           // cantidad de jugadores en alineación
+      // -- Si hay alineaciones oficiales (startingLineups existe): --
+      starting_lineups: [...],       // alineación titular oficial [API]
+      missing_players: [...],        // jugadores ausentes con motivo [API]
+      substitutes: [...],            // sustitutos disponibles [API]
+      predicted_lineups: [],        // vacío
+      unsure_missing: [],           // vacío
+      // -- Si NO hay oficiales pero hay predicción (predictedLineups): --
+      starting_lineups: [],          // vacío
+      missing_players: [],           // vacío
+      substitutes: [],               // vacío
+      predicted_lineups: [...],      // alineación predicha [API]
+      unsure_missing: [...],         // ausencias no confirmadas [API]
+    },
+    away: { formation, lineup_count, starting_lineups, missing_players, substitutes, predicted_lineups, unsure_missing },
     warnings: string[] | null
   },
   "summary": {
@@ -494,6 +527,8 @@ Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
 [Para postmatch — analysis_mode = "postmatch"]:
   El resultado [confirma/rompe] la tendencia reciente de cada equipo
   Resultado vs forma: [el partido fue consistente/inconsistente con la forma previa]
+
+**Nota:** La previa del partido debe ser concisa. Si excede 3-4 oraciones, resumir los puntos más relevantes para el análisis.
 ```
 
 **Degradación:**
@@ -509,6 +544,19 @@ Nota: [si la forma se extrajo solo del evento actual (N=1), indicarlo]
 ---
 
 ### Capa 3 — Protagonistas
+
+**Regla transversal (nueva):** Capa 3 = solo hechos + contexto mínimo. NO interpretación, NO peso, NO conclusiones, NO lenguaje causal.
+
+```
+Capa 3 NO puede contener:
+- conclusiones
+- inferencias
+- lenguaje causal ("porque", "esto implica", "esto sugiere")
+
+Solo descripción estructurada de datos.
+```
+
+**Pregunta única:** ¿qué hay? (NO: ¿qué significa?)
 
 **Lógica de dos carriles (siempre intentar ambos):**
 
@@ -531,6 +579,8 @@ Si ambos fallan → capa degradada con `[N/A]`.
 - No calcular "impact score", "impacto ofensivo", ni ninguna métrica compuesta.
 - **Sí se permite:** ranking directo por métrica individual (más goles, más pases clave, etc.).
 - **Dependencia:** proporción directa de goles/producción del jugador vs total del equipo.
+
+**Regla (nueva):** Los outputs de Capa 3 deben ser puramente descriptivos. No incluir frases como "esto afecta al equipo", "es una baja clave", "pierde poder ofensivo". Toda interpretación va en Capa 5.
 
 **Outputs por jugador (datos directos, sin fórmulas):**
 
@@ -570,16 +620,31 @@ Top creadores [IND]:
 
 ---
 
-**Carril B — Fuente alternativa desde `Get_Match_Lineups.missingPlayers`:**
+**Carril B — Fuentes desde `Get_Match_Lineups`:**
 
-Si `Get_Match_Player_Stats` no aporta datos en pre-partido, consultar `Get_Match_Lineups`.
-Si `missingPlayers` contiene jugadores ausentes, reportarlos en el Carril B.
+El script `build_match_context.py` procesa las alineaciones en dos niveles de prioridad (definidos en `normalize_lineups`):
+
+- **Nivel 1 — Alineaciones oficiales (`startingLineups` existe):**
+  - `missing_players`: lista de jugadores ausentes con `name`, `player_id`, `reason`, `country` [API]
+  - `substitutes`: sustitutos disponibles [API]
+  - `starting_lineups`: alineación titular oficial [API]
+  - `predicted_lineups`: vacío
+  - `unsure_missing`: vacío
+
+- **Nivel 2 — Alineación predicha (`startingLineups` NO existe, `predictedLineups` sí):**
+  - `unsure_missing`: jugadores cuya ausencia no está confirmada [API]
+  - `predicted_lineups`: alineación predicha [API]
+  - `missing_players`: vacío
+  - `substitutes`: vacío
+  - `starting_lineups`: vacío
+
+Si `missing_players` contiene jugadores ausentes, reportarlos según los niveles de ausencia definidos más abajo.
 
 **Niveles de ausencia (en orden de profundidad):**
 
 1. **Ausencia observada [API]:** Nombre + motivo tal como los devuelve la API (Injury, Inactive, Leg Injury, etc.). Solo reportar lo que la API indica.
 
-2. **Ausencia contextualizada [IND]:** Si además ese jugador aparece en `Get_Tournament_Top_Scorers` o como goleador/generador relevante en `Get_Team_Results` o `Get_Match_Player_Stats` de partidos previos → indicar: "[jugador] ausente — registrado como goleador/top del torneo [IND]."
+2. **Ausencia contextualizada [IND]:** Si además ese jugador aparece en `Get_Tournament_Top_Scorers` o como goleador/generador relevante en `Get_Team_Results` o `Get_Match_Player_Stats` de partidos previos → indicar: "[jugador] ausente — registrado como goleador/top del torneo [IND]." Solo reportar como hecho. No interpretar impacto.
 
 3. **Influencia incierta [N/A/IND]:** Si un jugador está ausente pero no hay evidencia suficiente para estimar su peso → marcar como "influencia no cuantificable con precisión [N/A]". Nunca inventar impacto.
 
@@ -651,6 +716,26 @@ Patrón de estilo: [N/A] — dato observacional no respaldado por stats.
 
 ### Capa 4 — Indicadores Compuestos
 
+**Regla (nueva):** Capa 4 puede nombrar indicadores, pero no explicar por qué importan.
+
+| Capa | Qué hace |
+|------|----------|
+| 4    | **Mide** |
+| 5    | **Explica** |
+
+**Pregunta única:** ¿cuánto? (NO: ¿por qué importa?)
+
+```
+Capa 4 NO puede contener:
+- conclusiones
+- inferencias
+- lenguaje causal ("porque", "esto implica", "esto sugiere")
+- "esto favorece a X"
+- "esto indica partido abierto"
+
+Solo descripción estructurada de datos comparables entre equipos.
+```
+
 **Inputs:** stats de partido (`Get_Match_Stats`), historial de equipos (`Get_Team_Results`), odds.
 
 **Cálculos:**
@@ -665,11 +750,12 @@ Patrón de estilo: [N/A] — dato observacional no respaldado por stats.
 - Volatilidad: desv. estándar de goles en últimos 5 de cada equipo
 - Estabilidad muestra: N partidos disponibles vs mínimo 5
 
-**Coherencia mercado-datos:**
-
+**Coherencia mercado-datos [IND]:**
 - **Alta:** mercado y datos históricos favorecen el mismo lado Y con magnitudes similares.
 - **Moderada:** coinciden en el lado, difieren en intensidad.
 - **Baja:** favorecen lados distintos, o uno ve equilibrio y el otro no.
+
+*(Medición de alineación — no interpretación de por qué.)*
 
 **Output obligatorio:**
 
@@ -694,32 +780,55 @@ Estabilidad muestra: [N] partidos / mínimo 5 — [suficiente/limitado]
 
 ---
 
+## 4.5 Regla Global de No-Redundancia
+
+> Cada capa debe aportar información **NUEVA**.
+> Si una idea ya fue expresada en una capa anterior, no debe repetirse
+> salvo que se transforme (ej: de dato → interpretación).
+
+**Impide:**
+- Capa 5 re-explicar forma, odds o rachas de capa 2
+- Capa 6 re-diagnosticar de capa 5
+- Capa 8 resumir señales de capa 6
+
+**Permite:**
+- Capa 5 toma datos de capa 2 y los interpreta causalmente
+- Capa 6 toma señales de capa 5 y las pondera por peso
+- Capa 8 toma la priorización de capa 6 y la traduce a lectura final
+
+**Flujo correcto:**
+```
+datos (capa 2) → medición (capa 4) → interpretación (capa 5) → priorización (capa 6) → predicción (capa 7) → síntesis (capa 8)
+```
+
+---
+
 ### Capa 5 — Diagnóstica
 
-**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible — **solo para partidos inprogress/finished**), `match_stats` (stats actuales del partido).
+**Pregunta única:** ¿Por qué esas señales importan?
+
+**Scope:** Causas + contradicciones + sostenibilidad
+
+**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible — solo para partidos inprogress/finished), `match_stats` (stats actuales del partido).
 
 **Regla sobre commentary (solo para partidos inprogress/finished, no para notstarted):**
-
-- Commentary **solo es válido si coincide con indicadores de otras capas**.
+- Commentary solo es válido si coincide con indicadores de otras capas.
 - No usar commentary como señal principal.
 - No sobreinterpretar eventos aislados.
 - Si commentary describe un patrón no respaldado por stats → omitir o marcar como "dato observacional no concluyente".
 
 **[Para inprogress]:** Agregar evaluación de lo que está pasando en el partido vs lo esperado:
-
-- ¿El marcador refleja lo que muestran las stats? (xG, posesión, tiros)
+- ¿El marcador refleja lo que muestran las stats?
 - ¿Algún equipo domina aunque no esté ganado?
 - ¿Eventos recientes cambiaron el partido?
 
-**Evaluar:**
+**Regla de causalidad (nueva):** Las causas NO pueden ser una reformulación directa de un dato numérico. Deben explicar el mecanismo, no repetir la métrica.
 
-1. ¿Resultados respaldados por stats de tiros? → sobre/sub-rendimiento real
-2. ¿Defensa concede por mérito propio o rivales débiles?
-3. ¿Over viene por volumen o por caos defensivo?
-4. ¿Favorito del mercado tiene respaldo en indicadores?
-5. ¿Señales contradictorias?
-6. ¿El estilo de partido se identifica en commentary? (caos, dominio de esquinas, volumen de llegadas)
-7. **[Para inprogress]** ¿El partido hasta ahora confirma o contradice el análisis pre-partido?
+❌ Ejemplo malo:
+"Madrid domina en casa porque tiene 2.25 ppg"
+
+✅ Ejemplo bueno:
+"Madrid domina en casa por la intensidad que impone en transiciones y la presión alta — el Bernabéu amplifica esa dinámica, no solo el promedio de puntos"
 
 **Output obligatorio:**
 
@@ -730,21 +839,16 @@ Estabilidad muestra: [N] partidos / mínimo 5 — [suficiente/limitado]
 - notstarted: "Por Qué Pasa" — análisis de tendencias pre-partido
 - inprogress: "Qué Está Pasando" — evaluación de lo que ocurre vs lo esperado + comparación con pre-match
 
-[Home]: [sobre/sub]-rendimiento — goles vs stats indica [explicación]
-[Causa de la tendencia]
+Causas [IND]:
+- [Causa real derivada de datos — explicar el MECANISMO, no reformular la métrica]
+- [Causa 2]
 
-[Si commentary disponible Y coincide con indicadores de otras capas:]
-Patrón de estilo: [según lo que surja del commentary — caos/defensivo/abierto/competido]
-
-[Si commentary disponible pero NO coincide con indicadores:]
-Patrón de estilo: [N/A] — dato observacional no respaldado por stats.
-
-[Si contradicciones:]
 Contradicciones:
-- [contradicción 1]
+- [contradicción 1 — mercado vs stats, forma vs contexto]
 - [contradicción 2]
 
-¿Sostenible? [sí/no] — [tendencia] → [sostenible/ruido]
+¿Sostenible?
+- sí/no — [razón basada en evidencia]
 
 [Para inprogress:]
 Análisis en vivo: El marcador [X-X] [refleja/no refleja] lo que muestran las stats (xG: [xg_home]-[xg_away], posesión: [pos_home]%-[pos_away]%).
@@ -754,7 +858,7 @@ Análisis en vivo: El marcador [X-X] [refleja/no refleja] lo que muestran las st
 
 **Degradación:**
 
-- Si no hay stats → omitir evaluación de sobre/sub-rendimiento.
+- Si no hay stats → no se pueden generar causas ni análisis de sostenibilidad.
 - Si no hay forma → "Datos insuficientes para diagnóstico de tendencia [N/A]."
 - Si `analysis_mode = "postmatch"`: el foco cambia de "qué podría pasar" a "qué pasó y por qué". Incluir contradicciones entre expectativa previa y desarrollo real.
 
@@ -769,6 +873,15 @@ Análisis en vivo: El marcador [X-X] [refleja/no refleja] lo que muestran las st
 | **Fuerte**   | Tiros, consistencia (N≥5), coincidencia mercado-indicadores, producción jugadores clave                                              | Rachas cortas sin respaldo, marcadores aislados |
 | **Moderada** | Forma con N=3-4, H2H sin contexto de local/visita, diff mercado-historial moderada, múltiples ausencias corroboradas por otras capas |                                                 |
 | **Débil**    | N<3, diff mercado-historial alta, mercado sin respaldo en indicadores, ausencias sin corroboración de otras capas                    |                                                 |
+
+**Regla de identidad (nueva):** Capa 6 es la ÚNICA capa de priorización. No se repite en Capa 8.
+
+Capa 6 NO debe:
+- Nueva interpretación causal (eso es capa 5)
+- Recomendación de mercados (eso es capa 8)
+- Repetir señales ya dichas
+
+Solo: priorizar por peso (fuerte/moderada/débil/no utilizable) con fuentes.
 
 **Ausencias múltiples registradas en `Get_Match_Lineups.missingPlayers`:**
 
@@ -854,44 +967,40 @@ Nota: "Predictiva basada en odds y stats históricas [y xG inlive para inprogres
 
 ---
 
-### Capa 8 — Prescriptiva Ligera
+### Capa 8 — Lectura Final
 
-**Reglas:**
+**Pregunta única:** ¿Con qué lectura final me quedo?
 
-- Emitir 3-5 señales más fuertes (de Capa 6).
-- Emitir 2-3 alertas (de Capa 5).
-- Mercados con sustento: solo los que tengan respaldo en al menos 2 capas.
-- Mercados sin sustento: explicar brevemente por qué.
-- **Tono cauteloso:** Usar siempre la frase
-  "lecturas mejor soportadas por la evidencia disponible".
+**Scope:** Interpretación humana + 1-2 mercados bien justificados (conceptual, no numérico)
+
+**Regla (nueva):** Capa 8 opera a nivel conceptual — escenarios, riesgos, lectura. NO repite probabilidades ni métricas numéricas de Capa 7, NO re-justifica con datos, NO resume señales de Capa 6.
+
+Capa 8 NO debe:
+- Lista de señales más fuertes (ya dichas en Capa 6)
+- Lista de alertas (ya dichas en Capa 5)
+- Lista de mercados con sustento (ya dichos en Capa 7)
+- Probabilidades ni métricas numéricas
+
+Solo traduce a: qué escenario tiene más sentido, qué riesgo oculto existe, qué NO comprar.
 
 **Output obligatorio:**
 
 ```
-## 8. Qué Leer con Mejor Soporte
+## 8. Lectura Final
 
-Señales más fuertes (3-5):
-1. [lectura] — respaldada por [fuente 1 + fuente 2]
+- Qué escenario tiene más sentido
+- Qué escenario tiene riesgo oculto
+- Qué NO comprar del partido
 
-Alertas (2-3):
-⚠ [alerta] — [razón]
-⚠ [equipo] llega con [X] ausencias registradas en la API [API] —
-  posible impacto en estabilidad, influencia no cuantificable con precisión.
+Opcional:
+- 1-2 mercados bien justificados (no lista — solo decisión final bien fundamentada)
 
-Mercados con sustento:
-- [mercado] → [razón]
-
-Mercados sin sustento:
-- [mercado] — [razón breve]
-
-Nota: "Las lecturas anteriores son las mejor soportadas por la evidencia
-disponible."
+Nota: "Las lecturas anteriores son las mejor soportadas por la evidencia disponible."
 ```
 
 **Degradación:**
 
-- Si Capa 7 es muy baja confianza → Capa 8 se reduce a "Señales más
-  fuertes" (sin recomendación de mercados).
+- Si Capa 7 es muy baja confianza → Capa 8 se reduce a "lectura de escenarios sin recomendación de mercados".
 - Si `analysis_mode = "postmatch"`: el foco cambia de "qué podría pasar" a "qué pasó y por qué". Incluir contradicciones entre expectativa previa y desarrollo real.
 
 ---
@@ -1100,6 +1209,18 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 
 **Etiquetas de fuente obligatorias en todo el análisis:**
 `[API]` `[ODDS]` `[IND]` `[N/A]`
+
+---
+
+## Reglas de No-Redundancia (Quick Ref)
+
+| Capa | Pregunta única | Qué NO hacer |
+|------|---------------|--------------|
+| 3    | ¿qué hay?     | No interpretar, no concluir |
+| 4    | ¿cuánto?      | No explicar por qué importa |
+| 5    | ¿por qué?     | No reformular datos numéricos — explicar mecanismo |
+| 6    | ¿cuáles pesan?| No repetir diagnóstico de capa 5 |
+| 8    | ¿con qué quedo?| No resumir señales de capa 6, no repetir números de capa 7 |
 
 ---
 
