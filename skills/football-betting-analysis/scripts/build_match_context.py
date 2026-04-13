@@ -1803,6 +1803,40 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         is_home = match.get("team_is_home", False)
         match["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
 
+    # Attach player_stats and aggregated to team_home_results matches
+    for match in final["team_home_results"].get("matches", []):
+        mid = match.get("match_id")
+        raw_ps = player_stats_map.get(mid)
+        is_home = match.get("team_is_home", True)
+
+        if raw_ps:
+            normalized = normalize_player_stats(raw_ps, home_team_id, away_team_id)
+            match["player_stats"] = normalized
+            match["aggregated"] = {
+                "home": compute_player_aggregates(normalized.get("home_players", [])),
+                "away": compute_player_aggregates(normalized.get("away_players", [])),
+            }
+        else:
+            match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
+            match["aggregated"] = {"home": {}, "away": {}}
+
+    # Attach player_stats and aggregated to team_away_results matches
+    for match in final["team_away_results"].get("matches", []):
+        mid = match.get("match_id")
+        raw_ps = player_stats_map.get(mid)
+        is_home = match.get("team_is_home", False)
+
+        if raw_ps:
+            normalized = normalize_player_stats(raw_ps, home_team_id, away_team_id)
+            match["player_stats"] = normalized
+            match["aggregated"] = {
+                "home": compute_player_aggregates(normalized.get("home_players", [])),
+                "away": compute_player_aggregates(normalized.get("away_players", [])),
+            }
+        else:
+            match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
+            match["aggregated"] = {"home": {}, "away": {}}
+
     # Also attach advanced_stats to H2H matches
     for rec in final["h2h"].get("matches", []):
         mid = rec.get("match_id")
