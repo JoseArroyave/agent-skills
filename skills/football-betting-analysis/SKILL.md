@@ -54,7 +54,7 @@ porcentajes.
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
 | `Get_Match_Details`             | Evento completo + odds                                                                   |
 | `Get_Match_H2H`                 | Head-to-head                                                                             |
-| `Get_Match_Stats`               | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.)  |
+| `Get_Match_Stats`               | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.) — también llamado en paralelo para cada partido del historial (matches[i].advanced_stats) |
 | `Get_Match_Player_Stats`        | Stats por jugador                                                                        |
 | `Get_Match_Lineups`             | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia               |
 | `Get_Match_Summary`             | Resumen con eventos clave                                                                |
@@ -276,6 +276,57 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       home_extra_time, away_extra_time,
       home_penalties, away_penalties
     },
+    "summary": {
+      events: [{ minutes, team, type, description }],
+      type: goal | own_goal | penalty_goal | penalty_missed | substitution | var | yellow_card | red_card | second_yellow
+      goals_home, goals_away,
+      warnings: string[] | null
+    },
+    "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
+    "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
+    "advanced_stats": {       // stats del partido actual (raw de fetch_match_stats — mismo formato que advanced_stats de historial)
+      "match": [
+        {"name": "Expected goals (xG)","home_team": <float>,"away_team": <float>},
+        {"name": "Goals","home_team": <int>,"away_team": <int>},
+        {"name": "Ball possession","home_team": "<X%>","away_team": "<X%>"},
+        {"name": "Total shots","home_team": <int>,"away_team": <int>},
+        {"name": "Shots on target","home_team": <int>,"away_team": <int>},
+        {"name": "Shots off target","home_team": <int>,"away_team": <int>},
+        {"name": "Blocked shots","home_team": <int>,"away_team": <int>},
+        {"name": "Shots inside the box","home_team": <int>,"away_team": <int>},
+        {"name": "Shots outside the box","home_team": <int>,"away_team": <int>},
+        {"name": "Big chances","home_team": <int>,"away_team": <int>},
+        {"name": "Corner kicks","home_team": <int>,"away_team": <int>},
+        {"name": "Touches in opposition box","home_team": <int>,"away_team": <int>},
+        {"name": "Accurate through passes","home_team": <int>,"away_team": <int>},
+        {"name": "Hit the woodwork","home_team": <int>,"away_team": <int>},
+        {"name": "Offsides","home_team": <int>,"away_team": <int>},
+        {"name": "Free kicks","home_team": <int>,"away_team": <int>},
+        {"name": "Throw ins","home_team": <int>,"away_team": <int>},
+        {"name": "Passes","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
+        {"name": "Long passes","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
+        {"name": "Passes in final third","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
+        {"name": "Crosses","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
+        {"name": "Expected assists (xA)","home_team": <float>,"away_team": <float>},
+        {"name": "xG on target (xGOT)","home_team": <float>,"away_team": <float>},
+        {"name": "Headed goals","home_team": <int>,"away_team": <int>},
+        {"name": "Fouls","home_team": <int>,"away_team": <int>},
+        {"name": "Tackles","home_team": "<pct%> (<won>/<attempted>)","away_team": "<pct%> (<won>/<attempted>)"},
+        {"name": "Duels won","home_team": <int>,"away_team": <int>},
+        {"name": "Clearances","home_team": <int>,"away_team": <int>},
+        {"name": "Interceptions","home_team": <int>,"away_team": <int>},
+        {"name": "Errors leading to shot","home_team": <int>,"away_team": <int>},
+        {"name": "Errors leading to goal","home_team": <int>,"away_team": <int>},
+        {"name": "Goalkeeper saves","home_team": <int>,"away_team": <int>},
+        {"name": "xGOT faced","home_team": <float>,"away_team": <float>},
+        {"name": "Goals prevented","home_team": <float>,"away_team": <float>},
+        {"name": "Yellow cards","home_team": <int>,"away_team": <int>},
+        {"name": "Red cards","home_team": <int>,"away_team": <int>}
+      ],
+        "1st-half": [...misma estructura...],
+        "2nd-half": [...misma estructura...],
+        warnings: string[] | null
+    },
     warnings: string[] | null
   },
   "odds": {
@@ -290,12 +341,21 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     prob_over_25, prob_btts_yes
   },
   "h2h": {
-    records: [{
+    matches: [{
       match_id, timestamp,
       home_score, away_score,
       home_team, away_team,
-      tournament_id, tournament_name
+      tournament_id, tournament_name,
+      advanced_stats: {           // stats del partido individual (enriquecido de fetch_match_stats)
+        match: { ... },
+        1st_half: { ... },
+        2nd_half: { ... },
+        warnings: []
+      }
     }],
+    form: {                  // solo advanced — basic no aplica para H2H agregado
+      advanced: {...}
+    },
     summary: { total_matches, home_wins, draws, away_wins, avg_goals },
     warnings: string[]
   },
@@ -303,41 +363,99 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     matches: [{
       tournament_id, tournament_name, match_id, timestamp,
       team_is_home, opponent,
-      goals_for, goals_against, total_goals, both_teams_scored
+      goals_for, goals_against, total_goals, both_teams_scored,
+      advanced_stats: {             // stats del partido individual (enriquecido de fetch_match_stats)
+        match: { ... },
+        1st_half: { ... },
+        2nd_half: { ... },
+        warnings: []
+      }
     }],
     form: {
-      last_n, form_string, points,
-      gf_avg, gc_avg,
-      over_25_freq, btts_freq,
-      home_ppg, home_gf_avg, home_gc_avg,
-      away_ppg, away_gf_avg, away_gc_avg
+      basic: {                   // stats básicos del historial
+        all_matches, form_string, points,
+        gf_avg, gc_avg,
+        over_25_freq, btts_freq,
+        home_ppg, home_gf_avg, home_gc_avg,
+        away_ppg, away_gf_avg, away_gc_avg
+      },
+      advanced: {                // stats agregadas del historial (de advanced_stats de cada match)
+        sample_size: 10,
+        overall: {
+          attack: {
+            goals_for_avg, xg_for_avg, xgot_for_avg, xa_for_avg,
+            shots_for_avg, shots_on_target_for_avg, shots_off_target_for_avg,
+            blocked_shots_for_avg, shots_inside_box_for_avg, shots_outside_box_for_avg,
+            big_chances_for_avg, touches_in_opposition_box_avg, hit_woodwork_avg
+          },
+          defense: {
+            goals_against_avg, xg_against_avg, xgot_faced_avg,
+            shots_against_avg, shots_on_target_against_avg, shots_off_target_against_avg,
+            blocked_shots_against_avg, shots_inside_box_against_avg, shots_outside_box_against_avg,
+            big_chances_against_avg, touches_in_opposition_box_against_avg,
+            goalkeeper_saves_avg, errors_leading_to_shot_avg, errors_leading_to_goal_avg, goals_prevented_avg
+          },
+          control: {
+            possession_avg, passes_accuracy_avg, passes_completed_avg, passes_attempted_avg,
+            long_pass_accuracy_avg, long_passes_completed_avg, long_passes_attempted_avg,
+            final_third_pass_accuracy_avg, final_third_passes_completed_avg, final_third_passes_attempted_avg,
+            accurate_through_passes_avg
+          },
+          set_pieces_and_territory: {
+            corners_for_avg, corners_against_avg, offsides_for_avg, offsides_against_avg,
+            free_kicks_for_avg, free_kicks_against_avg, throw_ins_for_avg, throw_ins_against_avg,
+            cross_accuracy_avg, crosses_completed_avg, crosses_attempted_avg
+          },
+          discipline: {
+            yellow_cards_avg, red_cards_avg, cards_total_avg, fouls_committed_avg
+          },
+          duels_and_defending: {
+            tackles_success_pct_avg, tackles_won_avg, tackles_attempted_avg,
+            duels_won_avg, clearances_avg, interceptions_avg
+          },
+          efficiency: {
+            shot_accuracy_pct, goal_conversion_pct, big_chance_conversion_pct,
+            xg_per_shot, shots_on_target_faced_per_goal_against, save_pct,
+            finishing_overperformance, conceding_overperformance
+          },
+          derived: {
+            xg_balance_avg, xg_ratio, shots_share, shots_on_target_share,
+            big_chances_balance_avg, corners_balance_avg, discipline_balance_avg
+          }
+        },
+        first_half: { /* mismo formato que overall */ },
+        second_half: { /* mismo formato que overall */ },
+        warnings: []
+      }
     },
     warnings: string[] | null
   },
   "team_away_results": {
     matches: [...same shape...],
-    form: {...},
-    warnings: string[] | null
-  },
-  "match_stats": {
-    stats: [{ name, home_team, away_team, home_pct, away_pct }],
-    possession: { home, away },
-    total_shots: { home, away },
-    shots_on_target: { home, away },
-    corners: { home, away },
-    yellow_cards: { home, away },
-    red_cards: { home, away },
-    xg: { home, away },
-    xgotal: { home, away },
-    passes: { home: { accuracy_pct, completed }, away: {...} },
+    form: {                  // igual estructura que team_home_results.form
+      basic: {...},
+      advanced: {...}
+    },
     warnings: string[] | null
   },
   "player_stats": {
-    home_players: [{ player_id, name, short_name, position, in_base_lineup,
-                     goals, assists, shots, shots_on_target, key_passes,
-                     tackles_won, interceptions, ball_recoveries,
-                     yellow_cards, red_cards, minutes }],
+    home_players: [{
+      player_id, name, short_name, position, in_base_lineup, is_goalkeeper,
+      stats: { [stat_key]: { value, rank, pct?, completed?, attempted? } },
+      goals, assists, shots, shots_on_target, key_passes,
+      tackles_won, interceptions, ball_recoveries,
+      yellow_cards, red_cards, minutes
+    }],
     away_players: [...same...],
+    home_aggregated: {
+      sample_size, minutes_total, goals_total, assists_total, shots_total,
+      shots_on_target_total, key_passes_total, tackles_won_total,
+      interceptions_total, ball_recoveries_total, yellow_cards_total,
+      red_cards_total, goals_per_90, assists_per_90, shots_per_90,
+      position_distribution: { [position]: count },
+      in_base_lineup_count, substitute_count
+    },
+    away_aggregated: {...same shape as home_aggregated...},
     top_scorers_home: [...],
     top_scorers_away: [...],
     top_assists_home: [...],
@@ -368,14 +486,6 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     away: { formation, lineup_count, starting_lineups, missing_players, substitutes, predicted_lineups, unsure_missing },
     warnings: string[] | null
   },
-  "summary": {
-    events: [{ minutes, team, type, description }],
-    type: goal | own_goal | penalty_goal | penalty_missed | substitution | var | yellow_card | red_card | second_yellow
-    goals_home, goals_away,
-    warnings: string[] | null
-  },
-  "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
-  "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
   "standings": {
     teams: { [team_id]: { position, name, points, wins, draws, losses, goals, goal_difference } },
     warnings: string[] | null
