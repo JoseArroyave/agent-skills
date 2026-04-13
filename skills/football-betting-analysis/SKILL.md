@@ -447,26 +447,30 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       yellow_cards, red_cards, minutes
     }],
     away_players: [...same...],
-    home_aggregated: {
-      sample_size, minutes_total, goals_total, assists_total, shots_total,
-      shots_on_target_total, key_passes_total, tackles_won_total,
-      interceptions_total, ball_recoveries_total, yellow_cards_total,
-      red_cards_total, goals_per_90, assists_per_90, shots_per_90,
+    warnings: string[] | null
+  },
+  // -- Historical match player_stats (attached to h2h.matches,
+  //    team_home_results.matches, team_away_results.matches) --
+  // Each match record in those lists also carries:
+  "player_stats": {
+    home_players: [...],    // re-oriented to analysis home/away
+    away_players: [...],
+    warnings: string[] | null
+  },
+  "aggregated": {
+    home: {                 // compute_player_aggregates(home_players)
+      sample_size, minutes_total, goals_total, assists_total,
+      shots_total, shots_on_target_total, key_passes_total,
+      tackles_won_total, interceptions_total, ball_recoveries_total,
+      yellow_cards_total, red_cards_total,
+      goals_per_90, assists_per_90, shots_per_90,
       position_distribution: { [position]: count },
       in_base_lineup_count, substitute_count
     },
-    away_aggregated: {...same shape as home_aggregated...},
-    top_scorers_home: [...],
-    top_scorers_away: [...],
-    top_assists_home: [...],
-    top_assists_away: [...],
-    top_shots_home: [...],
-    top_shots_away: [...],
-    top_key_passes_home: [...],
-    top_key_passes_away: [...],
-    warnings: string[] | null
-  },
-  "lineups": {
+    away: { ...same shape... }
+  }
+},
+"lineups": {
     home: {
       formation,              // formación reportada (de predictedFormation)
       lineup_count,           // cantidad de jugadores en alineación
