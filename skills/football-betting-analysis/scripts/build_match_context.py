@@ -1810,6 +1810,23 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         is_home = rec.get("team_is_home", True)
         rec["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
 
+    # Attach player_stats and aggregated to H2H matches
+    for rec in final["h2h"].get("matches", []):
+        mid = rec.get("match_id")
+        raw_ps = player_stats_map.get(mid)
+        is_home = rec.get("team_is_home", True)
+
+        if raw_ps:
+            normalized = normalize_player_stats(raw_ps, home_team_id, away_team_id)
+            rec["player_stats"] = normalized
+            rec["aggregated"] = {
+                "home": compute_player_aggregates(normalized.get("home_players", [])),
+                "away": compute_player_aggregates(normalized.get("away_players", [])),
+            }
+        else:
+            rec["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
+            rec["aggregated"] = {"home": {}, "away": {}}
+
     # Compute advanced_form for each team
     final["team_home_results"]["form"]["advanced"] = compute_advanced_form(final["team_home_results"]["matches"])
     final["team_away_results"]["form"]["advanced"] = compute_advanced_form(final["team_away_results"]["matches"])
