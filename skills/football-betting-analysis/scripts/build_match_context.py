@@ -549,6 +549,109 @@ def normalize_h2h(h2h_data: List) -> Dict:
     }
 
 
+def _compute_results_basic_stats(matches: List[Dict], label: str = "") -> Dict:
+    """
+    Compute form.basic stats (all_matches, form_string, points, gf_avg, gc_avg,
+    over_25_freq, btts_freq, home_*/away_*) from a list of matches.
+    Supports two formats:
+    - team_home_results/away_results: goals_for, goals_against, total_goals
+    - h2h: home_score, away_score, team_is_home (computes goals_for from orientation)
+    Used by both normalize_team_results and build_h2h_from_results.
+    """
+    form_records = []
+    pts = 0
+    gf = 0
+    gc = 0
+    over_count = 0
+    btts_count = 0
+
+    for m in matches:
+        is_home = m.get("team_is_home", True)
+        # h2h format: home_score, away_score
+        if "home_score" in m and "away_score" in m:
+            hs = m.get("home_score", 0) or 0
+            aw = m.get("away_score", 0) or 0
+            goals_for = hs if is_home else aw
+            goals_against = aw if is_home else hs
+            total_goals = hs + aw
+        # team results format: goals_for, goals_against
+        else:
+            goals_for = m.get("goals_for", 0) or 0
+            goals_against = m.get("goals_against", 0) or 0
+            total_goals = m.get("total_goals", goals_for + goals_against)
+
+        gf += goals_for
+        gc += goals_against
+        if total_goals > 2.5:
+            over_count += 1
+        if goals_for > 0 and goals_against > 0:
+            btts_count += 1
+
+        if goals_for > goals_against:
+            form_records.append("W")
+            pts += 3
+        elif goals_for == goals_against:
+            form_records.append("D")
+            pts += 1
+        else:
+            form_records.append("L")
+
+    n = len(matches)
+    form_string = "".join(form_records) if form_records else None
+
+    result = {
+        "all_matches": n,
+        "form_string": form_string,
+        "points": pts,
+        "gf_avg": round(gf / n, 2) if n > 0 else None,
+        "gc_avg": round(gc / n, 2) if n > 0 else None,
+        "over_25_freq": f"{over_count}/{n}" if n > 0 else None,
+        "btts_freq": f"{btts_count}/{n}" if n > 0 else None,
+    }
+
+    # Home / away split
+    home_matches = [m for m in matches if m.get("team_is_home")]
+    away_matches = [m for m in matches if not m.get("team_is_home")]
+
+    def _get_gf_gc(m: Dict):
+        is_home = m.get("team_is_home", True)
+        if "home_score" in m and "away_score" in m:
+            hs = m.get("home_score", 0) or 0
+            aw = m.get("away_score", 0) or 0
+            return (hs if is_home else aw), (aw if is_home else hs)
+        return m.get("goals_for", 0) or 0, m.get("goals_against", 0) or 0
+
+    if home_matches:
+        h_pts = 0
+        h_gf = sum(_get_gf_gc(m)[0] for m in home_matches)
+        h_gc = sum(_get_gf_gc(m)[1] for m in home_matches)
+        for m in home_matches:
+            gf_m, gc_m = _get_gf_gc(m)
+            if gf_m > gc_m:
+                h_pts += 3
+            elif gf_m == gc_m:
+                h_pts += 1
+        result["home_ppg"] = round(h_pts / len(home_matches), 2)
+        result["home_gf_avg"] = round(h_gf / len(home_matches), 2)
+        result["home_gc_avg"] = round(h_gc / len(home_matches), 2)
+
+    if away_matches:
+        a_pts = 0
+        a_gf = sum(_get_gf_gc(m)[0] for m in away_matches)
+        a_gc = sum(_get_gf_gc(m)[1] for m in away_matches)
+        for m in away_matches:
+            gf_m, gc_m = _get_gf_gc(m)
+            if gf_m > gc_m:
+                a_pts += 3
+            elif gf_m == gc_m:
+                a_pts += 1
+        result["away_ppg"] = round(a_pts / len(away_matches), 2)
+        result["away_gf_avg"] = round(a_gf / len(away_matches), 2)
+        result["away_gc_avg"] = round(a_gc / len(away_matches), 2)
+
+    return result
+
+
 def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, home_name: str, away_name: str) -> Dict:
     """
     Build H2H matches from the two teams' match histories.
@@ -591,6 +694,7 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
             mid = m.get("match_id")
             home_score, away_score = to_actual_scores(m)
             actual_home_team, actual_away_team = to_actual_teams(m, home_name)
+            is_home = m.get("team_is_home", True)
 
             match_map[mid] = {
                 "match_id": mid,
@@ -601,7 +705,7 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
                 "away_team": actual_away_team,
                 "tournament_id": m.get("tournament_id", ""),
                 "tournament_name": m.get("tournament_name", ""),
-                "team_is_home": is_home,  # orientation for goals_for/goals_against
+                "team_is_home": is_home,
             }
 
     # From away team's history
@@ -632,9 +736,10 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
     total_goals = 0
     home_wins, away_wins, draws = 0, 0, 0
 
+    # Also compute per-match goals_for/goals_against for form.basic
     for r in matches:
-        gf = r["home_score"]
-        gc = r["away_score"]
+        gf = r.get("goals_for", 0)
+        gc = r.get("goals_against", 0)
         total_goals += gf + gc
 
         # Ojo: aquí "home_wins" y "away_wins" significan local/visitante real,
@@ -659,10 +764,13 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
             "avg_goals": avg_goals,
         }
 
+    # Compute form.basic from h2h matches (with team_is_home orientation)
+    form_basic = _compute_results_basic_stats(matches, "h2h")
+
     return {
         "matches": matches,
         "summary": summary,
-        "form": {},      # basic stats added after, advanced added later via compute_advanced_form
+        "form": {"basic": form_basic},   # advanced added later via compute_advanced_form
         "warnings": [],
     }
 
@@ -734,78 +842,14 @@ def normalize_team_results(team_results_data: Dict, team_name: str, team_id: str
     all_matches.sort(key=lambda m: m.get("timestamp") or 0, reverse=True)
     all_matches = all_matches[:MAX_MATCHES]
 
-    form_records = []
-    pts = 0
-    gf = 0
-    gc = 0
-    over_count = 0
-    btts_count = 0
-
-    for m in all_matches:
-        gf += m["goals_for"]
-        gc += m["goals_against"]
-        if m["total_goals"] > 2.5:
-            over_count += 1
-        if m["both_teams_scored"]:
-            btts_count += 1
-
-        if m["goals_for"] > m["goals_against"]:
-            form_records.append("W")
-            pts += 3
-        elif m["goals_for"] == m["goals_against"]:
-            form_records.append("D")
-            pts += 1
-        else:
-            form_records.append("L")
-
-    n = len(all_matches)
-    form_string = "".join(form_records) if form_records else None
+    # Compute basic stats via shared helper
+    basic_stats = _compute_results_basic_stats(all_matches, team_name)
 
     result = {
         "matches": all_matches,
-        "form": {
-            "basic": {
-                "all_matches": n,
-                "form_string": form_string,
-                "points": pts,
-                "gf_avg": round(gf / n, 2) if n > 0 else None,
-                "gc_avg": round(gc / n, 2) if n > 0 else None,
-                "over_25_freq": f"{over_count}/{n}" if n > 0 else None,
-                "btts_freq": f"{btts_count}/{n}" if n > 0 else None,
-            },
-        },
+        "form": {"basic": basic_stats},
         "warnings": [],
     }
-
-    # Home / away split
-    home_matches = [m for m in all_matches if m["team_is_home"]]
-    away_matches = [m for m in all_matches if not m["team_is_home"]]
-
-    if home_matches:
-        h_pts = 0
-        h_gf = sum(m["goals_for"] for m in home_matches)
-        h_gc = sum(m["goals_against"] for m in home_matches)
-        for m in home_matches:
-            if m["goals_for"] > m["goals_against"]:
-                h_pts += 3
-            elif m["goals_for"] == m["goals_against"]:
-                h_pts += 1
-        result["form"]["basic"]["home_ppg"] = round(h_pts / len(home_matches), 2)
-        result["form"]["basic"]["home_gf_avg"] = round(h_gf / len(home_matches), 2)
-        result["form"]["basic"]["home_gc_avg"] = round(h_gc / len(home_matches), 2)
-
-    if away_matches:
-        a_pts = 0
-        a_gf = sum(m["goals_for"] for m in away_matches)
-        a_gc = sum(m["goals_against"] for m in away_matches)
-        for m in away_matches:
-            if m["goals_for"] > m["goals_against"]:
-                a_pts += 3
-            elif m["goals_for"] == m["goals_against"]:
-                a_pts += 1
-        result["form"]["basic"]["away_ppg"] = round(a_pts / len(away_matches), 2)
-        result["form"]["basic"]["away_gf_avg"] = round(a_gf / len(away_matches), 2)
-        result["form"]["basic"]["away_gc_avg"] = round(a_gc / len(away_matches), 2)
 
     return result
 
@@ -957,6 +1001,49 @@ def normalize_advanced_stats(raw_stats: Optional[Dict], *, team_is_home: bool = 
             if not team_is_home:
                 parsed = {"for": parsed.get("against"), "against": parsed.get("for")}
             result[period_key][key] = parsed
+
+    return result
+
+
+def normalize_advanced_stats_flat(raw_stats: Optional[Dict]) -> Dict:
+    """
+    Flat array format for the current match's advanced_stats.
+    Returns {match: [{name, home_team, away_team}, ...],
+             1st-half: [...], 2nd-half: [...], warnings: []}.
+    """
+    result = {
+        "match": [],
+        "1st-half": [],
+        "2nd-half": [],
+        "warnings": [],
+    }
+
+    if not raw_stats:
+        result["warnings"].append("Match stats not available [N/A]")
+        return result
+
+    for period_key in ("match", "1st-half", "2nd-half"):
+        period_data = raw_stats.get(period_key, [])
+        if not isinstance(period_data, list):
+            continue
+
+        seen_names: set = set()
+        for item in period_data:
+            if not isinstance(item, dict):
+                continue
+            stat_name = item.get("name")
+            if not stat_name or stat_name in seen_names:
+                continue
+            seen_names.add(stat_name)
+
+            home_val = item.get("home_team")
+            away_val = item.get("away_team")
+
+            result[period_key].append({
+                "name": stat_name,
+                "home_team": home_val,
+                "away_team": away_val,
+            })
 
     return result
 
@@ -1155,7 +1242,6 @@ def compute_advanced_form(matches: List[Dict]) -> Dict:
     total = len(matches)
 
     result = {
-        "sample_size": n,
         "overall": compute_category_averages(valid, "match"),
         "first_half": compute_category_averages(valid, "1st-half"),
         "second_half": compute_category_averages(valid, "2nd-half"),
@@ -1165,7 +1251,6 @@ def compute_advanced_form(matches: List[Dict]) -> Dict:
         result["warnings"].append(f"advanced_stats_partial: {n}/{total} matches con stats")
     if n == 0:
         result = {
-            "sample_size": 0,
             "overall": {},
             "first_half": {},
             "second_half": {},
@@ -1217,6 +1302,35 @@ def parse_pass_stat(value: Any) -> Dict:
     return {"pct": pct, "completed": completed, "attempted": attempted}
 
 
+def compute_team_player_aggregates(matches: List[Dict]) -> Dict:
+    """
+    Aggregate player stats across all historical matches for one team.
+    Collects all player records from each match's player_stats,
+    orienting by team_is_home to select the right player list per match,
+    then computes totals across the full sample.
+    """
+    all_home_players: List[Dict] = []
+    all_away_players: List[Dict] = []
+
+    for match in matches:
+        ps = match.get("player_stats", {})
+        if not ps or ps.get("warnings"):
+            continue
+        is_home = match.get("team_is_home", True)
+        if is_home:
+            all_home_players.extend(ps.get("home_players", []))
+            all_away_players.extend(ps.get("away_players", []))
+        else:
+            # When the analyzed team was away, their players are in away_players from API perspective
+            all_away_players.extend(ps.get("home_players", []))
+            all_home_players.extend(ps.get("away_players", []))
+
+    return {
+        "as_historical_home": compute_player_aggregates(all_home_players),
+        "as_historical_away": compute_player_aggregates(all_away_players),
+    }
+
+
 def compute_player_aggregates(players: List[Dict]) -> Dict:
     """
     Aggregate stats across all players of a team within a single match.
@@ -1233,7 +1347,6 @@ def compute_player_aggregates(players: List[Dict]) -> Dict:
     n = len(players)
 
     totals = {
-        "sample_size": n,
         "minutes_total": total_minutes,
         "goals_total": sum(g(p, "goals") for p in players),
         "assists_total": sum(g(p, "assists") for p in players),
@@ -1418,6 +1531,42 @@ def normalize_lineups(lineup_data: Any) -> Dict:
             result["away"] = team_data
 
     return result
+
+def normalize_summary(summary_data: Any) -> Dict:
+    """
+    Normalize match summary data (goals, cards, etc.) into a structured format.
+    Adds `type` from event kind and `goals_home`/`goals_away` totals.
+    """
+    if not summary_data:
+        return {"events": [], "warnings": ["Match summary not available [N/A]"]}
+
+    events = []
+    for event in summary_data:
+        kind = event.get("kind") or ""
+        if "goal" in kind.lower():
+            evt_type = "goal"
+        elif "yellow" in kind.lower():
+            evt_type = "yellow_card"
+        elif "red" in kind.lower():
+            evt_type = "red_card"
+        elif "substitution" in kind.lower() or "change" in kind.lower():
+            evt_type = "substitution"
+        elif "penalty" in kind.lower():
+            evt_type = "penalty"
+        elif "var" in kind.lower():
+            evt_type = "var"
+        else:
+            evt_type = "other"
+
+        events.append({
+            "type": evt_type,
+            "minutes": event.get("minutes"),
+            "description": event.get("description") or "",
+            "team": event.get("team") or "",
+            "players": [{"name": p.get("name"), "type": p.get("type")} for p in event.get("players", [])],
+        })
+
+    return {"events": events, "warnings": []}
 
 def normalize_standings(standings_data: List, team_ids: set) -> Dict:
     """
@@ -1640,6 +1789,58 @@ def validate_data_completeness(ctx: Dict) -> Dict[str, List[str]]:
     return result
 
 
+def _compute_top_level_stats(matches: List[Dict]) -> Dict:
+    """
+    Compute top-level summary stats (total_matches, wins, draws, losses,
+    goals_for, goals_against, total_goals, both_teams_scored) from a list
+    of matches. Supports two formats:
+    - team_home_results/away_results: goals_for, goals_against, total_goals
+    - h2h: home_score, away_score, team_is_home (computes goals_for from orientation)
+    """
+    wins = draws = losses = 0
+    goals_for = goals_against = total_goals = 0
+    btts_count = 0
+    n = len(matches)
+
+    for m in matches:
+        # h2h format: home_score, away_score, team_is_home
+        if "home_score" in m and "away_score" in m:
+            hs = m.get("home_score", 0) or 0
+            aw = m.get("away_score", 0) or 0
+            is_home = m.get("team_is_home", True)
+            gf = hs if is_home else aw
+            ga = aw if is_home else hs
+            tg = hs + aw
+        # team results format: goals_for, goals_against
+        else:
+            gf = m.get("goals_for", 0) or 0
+            ga = m.get("goals_against", 0) or 0
+            tg = m.get("total_goals", gf + ga)
+
+        goals_for += gf
+        goals_against += ga
+        total_goals += tg
+        if gf > ga:
+            wins += 1
+        elif gf == ga:
+            draws += 1
+        else:
+            losses += 1
+        if gf > 0 and ga > 0:
+            btts_count += 1
+
+    return {
+        "total_matches": n,
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "goals_for": goals_for,
+        "goals_against": goals_against,
+        "total_goals": total_goals,
+        "both_teams_scored": f"{btts_count}/{n}" if n > 0 else None,
+    }
+
+
 # =============================================================================
 # MAIN ORCHESTRATOR
 # =============================================================================
@@ -1662,7 +1863,6 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "team_home_results": {},
         "team_away_results": {},
         "match_stats": {},
-        "player_stats": {},
         "lineups": {},
         "standings": {},
         "overunder_standings": {},
@@ -1803,39 +2003,35 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         is_home = match.get("team_is_home", False)
         match["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
 
-    # Attach player_stats and aggregated to team_home_results matches
+    # Attach player_stats to team_home_results matches (per-match, no aggregation)
     for match in final["team_home_results"].get("matches", []):
         mid = match.get("match_id")
         raw_ps = player_stats_map.get(mid)
         is_home = match.get("team_is_home", True)
 
+        # Swap IDs to match API perspective when this historical match
+        # was played with our analysis away-team as home
+        api_home_id = away_team_id if not is_home else home_team_id
+        api_away_id = home_team_id if not is_home else away_team_id
+
         if raw_ps:
-            normalized = normalize_player_stats(raw_ps, home_team_id, away_team_id)
-            match["player_stats"] = normalized
-            match["aggregated"] = {
-                "home": compute_player_aggregates(normalized.get("home_players", [])),
-                "away": compute_player_aggregates(normalized.get("away_players", [])),
-            }
+            match["player_stats"] = normalize_player_stats(raw_ps, api_home_id, api_away_id)
         else:
             match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
-            match["aggregated"] = {"home": {}, "away": {}}
 
-    # Attach player_stats and aggregated to team_away_results matches
+    # Attach player_stats to team_away_results matches (per-match, no aggregation)
     for match in final["team_away_results"].get("matches", []):
         mid = match.get("match_id")
         raw_ps = player_stats_map.get(mid)
         is_home = match.get("team_is_home", False)
 
+        api_home_id = away_team_id if not is_home else home_team_id
+        api_away_id = home_team_id if not is_home else away_team_id
+
         if raw_ps:
-            normalized = normalize_player_stats(raw_ps, home_team_id, away_team_id)
-            match["player_stats"] = normalized
-            match["aggregated"] = {
-                "home": compute_player_aggregates(normalized.get("home_players", [])),
-                "away": compute_player_aggregates(normalized.get("away_players", [])),
-            }
+            match["player_stats"] = normalize_player_stats(raw_ps, api_home_id, api_away_id)
         else:
             match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
-            match["aggregated"] = {"home": {}, "away": {}}
 
     # Also attach advanced_stats to H2H matches
     for rec in final["h2h"].get("matches", []):
@@ -1844,45 +2040,69 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         is_home = rec.get("team_is_home", True)
         rec["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
 
-    # Attach player_stats and aggregated to H2H matches
+    # Attach player_stats to H2H matches (per-match, no aggregation)
     for rec in final["h2h"].get("matches", []):
         mid = rec.get("match_id")
         raw_ps = player_stats_map.get(mid)
         is_home = rec.get("team_is_home", True)
 
+        api_home_id = away_team_id if not is_home else home_team_id
+        api_away_id = home_team_id if not is_home else away_team_id
+
         if raw_ps:
-            normalized = normalize_player_stats(raw_ps, home_team_id, away_team_id)
-            rec["player_stats"] = normalized
-            rec["aggregated"] = {
-                "home": compute_player_aggregates(normalized.get("home_players", [])),
-                "away": compute_player_aggregates(normalized.get("away_players", [])),
-            }
+            rec["player_stats"] = normalize_player_stats(raw_ps, api_home_id, api_away_id)
         else:
             rec["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
-            rec["aggregated"] = {"home": {}, "away": {}}
 
     # Compute advanced_form for each team
     final["team_home_results"]["form"]["advanced"] = compute_advanced_form(final["team_home_results"]["matches"])
     final["team_away_results"]["form"]["advanced"] = compute_advanced_form(final["team_away_results"]["matches"])
     final["h2h"]["form"]["advanced"] = compute_advanced_form(final["h2h"].get("matches", []))
 
+    # Aggregate player stats across all historical matches per team
+    final["team_home_results"]["player_stats"] = compute_team_player_aggregates(
+        final["team_home_results"].get("matches", [])
+    )
+    final["team_away_results"]["player_stats"] = compute_team_player_aggregates(
+        final["team_away_results"].get("matches", [])
+    )
+    final["h2h"]["player_stats"] = compute_team_player_aggregates(
+        final["h2h"].get("matches", [])
+    )
+
+    # Add top-level summary stats to team_home_results and team_away_results
+    final["team_home_results"] = {
+        **final["team_home_results"],
+        **_compute_top_level_stats(final["team_home_results"].get("matches", [])),
+    }
+    final["team_away_results"] = {
+        **final["team_away_results"],
+        **_compute_top_level_stats(final["team_away_results"].get("matches", [])),
+    }
+
+    # Add top-level summary stats to h2h (goals_for/goals_against already in h2h.matches)
+    final["h2h"] = {
+        **final["h2h"],
+        **_compute_top_level_stats(final["h2h"].get("matches", [])),
+    }
+
     # -------------------------------------------------------------------------
     # 5. ACTUAL MATCH STATS
     # -------------------------------------------------------------------------
-    final["match"]["advanced_stats"] = {"warnings": ["Match stats not available for matches that have not started [N/A]"]}
+    final["match"]["advanced_stats"] = {"match": [], "1st-half": [], "2nd-half": [], "warnings": ["Match stats not available for matches that have not started [N/A]"]}
     if final["match"]["status"] != "notstarted":
         stats_raw = fetch_match_stats(event_id)
         if stats_raw:
-            final["match"]["advanced_stats"] = normalize_advanced_stats(stats_raw)
+            final["match"]["advanced_stats"] = normalize_advanced_stats_flat(stats_raw)
             
     # -------------------------------------------------------------------------
-    # 6. PLAYER STATS
+    # 6. PLAYER STATS — CURRENT MATCH (inside match object)
     # -------------------------------------------------------------------------
     ps_raw = fetch_match_player_stats(event_id)
     if ps_raw:
-        final["player_stats"] = normalize_player_stats(ps_raw, home_team_id, away_team_id)
+        final["match"]["player_stats"] = normalize_player_stats(ps_raw, home_team_id, away_team_id)
     else:
-        final["player_stats"] = {"warnings": ["Player stats not available [N/A]"]}
+        final["match"]["player_stats"] = {"warnings": ["Player stats not available [N/A]"]}
 
     # -------------------------------------------------------------------------
     # 7. LINEUPS / MISSING PLAYERS
@@ -1900,12 +2120,12 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     if final["match"]["status"] != "notstarted":
         summary_raw = fetch_match_summary(event_id)
         if summary_raw:
-            final["match"]["summary"] = summary_raw
+            final["match"]["summary"] = normalize_summary(summary_raw)
 
     # -------------------------------------------------------------------------
     # 9. COMMENTARY (minute-by-minute live commentary — solo para partidos inprogress/finished, no para notstarted)
     # -------------------------------------------------------------------------
-    final["match"]["commentary"] = {"warnings": ["Commentary not available for matches that have not started [N/A]"]}
+    final["match"]["commentary"] = None
     if final["match"]["status"] != "notstarted":
         commentary_raw = fetch_match_commentary(event_id)
         if commentary_raw:
@@ -1917,9 +2137,10 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     home_slug = {"slug": build_preview_slug(home_url), "id": home_team_id}
     away_slug = {"slug": build_preview_slug(away_url), "id": away_team_id}
     preview_raw = fetch_preview(home_slug, away_slug, event_id)
-    final["match"]["preview"] = preview_raw
-    if not preview_raw:
-        final["match"]["preview"] = {"warnings": ["Match preview not available [N/A]"]}
+    if preview_raw:
+        final["match"]["preview"] = preview_raw
+    else:
+        final["match"]["preview"] = None
 
     # -------------------------------------------------------------------------
     # 10. TOURNAMENT STANDINGS
@@ -1972,7 +2193,7 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     # 15. AGGREGATE INDICATORS
     # -------------------------------------------------------------------------
     final["indicators"]["offensive_dependency"] = compute_offensive_dependency(
-        final["player_stats"],
+        final["match"]["player_stats"],
         {"home": final["team_home_results"], "away": final["team_away_results"]},
         final["top_scorers"],
     )

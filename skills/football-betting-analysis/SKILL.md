@@ -277,13 +277,11 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       home_penalties, away_penalties
     },
     "summary": {
-      events: [{ minutes, team, type, description }],
-      type: goal | own_goal | penalty_goal | penalty_missed | substitution | var | yellow_card | red_card | second_yellow
-      goals_home, goals_away,
+      events: [{ type, minutes, description, team, players: [{name, type}] }],
       warnings: string[] | null
     },
     "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
-    "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
+    "preview": string | null,  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
     "advanced_stats": {       // stats del partido actual (raw de fetch_match_stats — mismo formato que advanced_stats de historial)
       "match": [
         {"name": "Expected goals (xG)","home_team": <float>,"away_team": <float>},
@@ -327,6 +325,17 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
         "2nd-half": [...misma estructura...],
         warnings: string[] | null
     },
+    "player_stats": {
+      home_players: [{
+        player_id, name, short_name, position, in_base_lineup, is_goalkeeper,
+        stats: { [stat_key]: { value, rank, pct?, completed?, attempted? } },
+        goals, assists, shots, shots_on_target, key_passes,
+        tackles_won, interceptions, ball_recoveries,
+        yellow_cards, red_cards, minutes
+      }],
+      away_players: [...same...],
+      warnings: string[] | null
+    },
     warnings: string[] | null
   },
   "odds": {
@@ -341,34 +350,53 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     prob_over_25, prob_btts_yes
   },
   "h2h": {
+    total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
     matches: [{
       match_id, timestamp,
       home_score, away_score,
       home_team, away_team,
       tournament_id, tournament_name,
+      team_is_home, opponent,
       advanced_stats: {           // stats del partido individual (enriquecido de fetch_match_stats)
         match: { ... },
         1st_half: { ... },
         2nd_half: { ... },
         warnings: []
+      },
+      player_stats: {             // normalizado por match, re-orientado a perspectiva del análisis
+        home_players: [...],
+        away_players: [...],
+        warnings: string[] | null
       }
     }],
-    form: {                  // solo advanced — basic no aplica para H2H agregado
-      advanced: {...}
+    form: {
+      advanced: {...},
+      basic: {...}
     },
-    summary: { total_matches, home_wins, draws, away_wins, avg_goals },
+    player_stats: {
+      as_historical_home: { minutes_total, goals_total, assists_total, shots_total, ... },
+      as_historical_away: { ...same shape... }
+    },
     warnings: string[]
   },
   "team_home_results": {
+    total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
     matches: [{
-      tournament_id, tournament_name, match_id, timestamp,
+      match_id, timestamp,
+      home_score, away_score,
+      home_team, away_team,
+      tournament_id, tournament_name,
       team_is_home, opponent,
-      goals_for, goals_against, total_goals, both_teams_scored,
       advanced_stats: {             // stats del partido individual (enriquecido de fetch_match_stats)
         match: { ... },
         1st_half: { ... },
         2nd_half: { ... },
         warnings: []
+      },
+      player_stats: {               // normalizado por match, re-orientado a perspectiva del análisis
+        home_players: [...],
+        away_players: [...],
+        warnings: string[] | null
       }
     }],
     form: {
@@ -380,7 +408,6 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
         away_ppg, away_gf_avg, away_gc_avg
       },
       advanced: {                // stats agregadas del historial (de advanced_stats de cada match)
-        sample_size: 10,
         overall: {
           attack: {
             goals_for_avg, xg_for_avg, xgot_for_avg, xa_for_avg,
@@ -428,48 +455,25 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
         warnings: []
       }
     },
+    player_stats: {
+      as_historical_home: { minutes_total, goals_total, assists_total, shots_total, ... },
+      as_historical_away: { ...same shape... }
+    },
     warnings: string[] | null
   },
   "team_away_results": {
-    matches: [...same shape...],
-    form: {                  // igual estructura que team_home_results.form
+    total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
+    matches: [...same shape as team_home_results.matches...],
+    form: {
       basic: {...},
       advanced: {...}
     },
-    warnings: string[] | null
-  },
-  "player_stats": {
-    home_players: [{
-      player_id, name, short_name, position, in_base_lineup, is_goalkeeper,
-      stats: { [stat_key]: { value, rank, pct?, completed?, attempted? } },
-      goals, assists, shots, shots_on_target, key_passes,
-      tackles_won, interceptions, ball_recoveries,
-      yellow_cards, red_cards, minutes
-    }],
-    away_players: [...same...],
-    warnings: string[] | null
-  },
-  // -- Historical match player_stats (attached to h2h.matches,
-  //    team_home_results.matches, team_away_results.matches) --
-  // Each match record in those lists also carries:
-  "player_stats": {
-    home_players: [...],    // re-oriented to analysis home/away
-    away_players: [...],
-    warnings: string[] | null
-  },
-  "aggregated": {
-    home: {                 // compute_player_aggregates(home_players)
-      sample_size, minutes_total, goals_total, assists_total,
-      shots_total, shots_on_target_total, key_passes_total,
-      tackles_won_total, interceptions_total, ball_recoveries_total,
-      yellow_cards_total, red_cards_total,
-      goals_per_90, assists_per_90, shots_per_90,
-      position_distribution: { [position]: count },
-      in_base_lineup_count, substitute_count
+    player_stats: {
+      as_historical_home: { minutes_total, goals_total, assists_total, shots_total, ... },
+      as_historical_away: { ...same shape... }
     },
-    away: { ...same shape... }
-  }
-},
+    warnings: string[] | null
+  },
 "lineups": {
     home: {
       formation,              // formación reportada (de predictedFormation)
