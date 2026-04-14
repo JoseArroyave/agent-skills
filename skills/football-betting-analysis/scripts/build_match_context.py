@@ -1706,8 +1706,6 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         home_name,
         away_name,
     )
-    if h2h.get("matches") and len(h2h["matches"]) < 3:
-        h2h["warnings"] = (h2h.get("warnings") or []) + ["derived_h2h_partial: fewer than 3 shared matches found"]
     final["h2h"] = h2h
 
     # --- ADVANCED STATS: Fetch in parallel for all historical matches ---
