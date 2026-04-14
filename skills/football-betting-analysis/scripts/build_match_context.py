@@ -14,15 +14,32 @@ Usage:
 import os
 import sys
 import json
-import requests
+import time
 import re
 import html
+import random
+import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
 MAX_MATCHES = 10
+MAX_WORKERS = 6
+API_SLEEP_INITIAL = 1.0
+API_SLEEP_BETWEEN = 0.4
+
+# Football domain constants
+PARTY_MINUTES = 90.0          # minutes per match for per-90 calculations
+FORM_DIFF_THRESHOLD = 0.5    # goal-average threshold for market incoherence check
+FAVOURITE_STRONG_THRESHOLD = 60.0   # market prob (%) for strong favourite
+FAVOURITE_LEAN_THRESHOLD = 50.0     # market prob (%) for lean favourite
+MAX_AVG_GOALS_H2H = 5        # alert threshold for H2H avg goals
 
 # =============================================================================
 # CONFIGURATION
@@ -88,6 +105,7 @@ def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return None
 
 
+
 # =============================================================================
 # FETCH FUNCTIONS — one per endpoint
 # =============================================================================
@@ -117,30 +135,14 @@ def fetch_match_lineups(event_id: str) -> Optional[List]:
     return api_get("/matches/match/lineups", params={"match_id": event_id})
 
 
-def fetch_match_summary(event_id: str) -> Optional[List]:
-    """Get match summary (key events: goals, cards)."""
-    return api_get("/matches/match/summary", params={"match_id": event_id})
-
-
-def fetch_match_commentary(event_id: str) -> Optional[List]:
-    """Get minute-by-minute commentary."""
-    return api_get("/matches/match/commentary", params={"match_id": event_id})
-
-
 def fetch_team_results(team_id: str, page: int = 1) -> Optional[Dict]:
     """Get recent match results for a team."""
     return api_get("/teams/results", params={"team_id": team_id, "page": page})
 
 
-def fetch_team_fixtures(team_id: str, page: int = 1) -> Optional[Dict]:
-    """Get upcoming fixtures for a team."""
-    return api_get("/teams/fixtures", params={"team_id": team_id, "page": page})
-
-
 def build_preview_slug(team_url: str) -> str:
     """Convert team URL to URL slug format for FlashScore preview URL."""
     if not team_url: return ""
-    slug = team_url.lower()
     slug = team_url.split("/")[2]
     slug = re.sub(r"[áàä]", "a", slug)
     slug = re.sub(r"[éèë]", "e", slug)
@@ -151,14 +153,6 @@ def build_preview_slug(team_url: str) -> str:
     slug = re.sub(r"[^a-z0-9-]", "", slug)
     slug = re.sub(r"-+", "-", slug)
     return slug.strip("-")
-
-import re
-import sys
-import html
-import requests
-from bs4 import BeautifulSoup
-from typing import Dict, Optional
-
 
 def fix_mojibake(text: str) -> str:
     """
@@ -206,32 +200,24 @@ def clean_preview(preview: Optional[str]) -> Optional[str]:
         return None
 
     text = html.unescape(preview)
-
-    # Fix escaped slashes: \/ -> /
     text = text.replace("\\/", "/")
-
-    # Fix encoding
     text = fix_mojibake(text)
 
-    # Remove opening pseudo-tags like [a ...]
-    text = re.sub(r"\[a[^\]]*\]", "", text)
-
-    # Replace structural tags
-    text = text.replace("[/h2]", ". ")
-    text = text.replace("[/p]", " ")
-    text = text.replace("[/b]", "")
-    text = text.replace("[/a]", "")
-
-    # Remove simple opening tags
-    text = text.replace("[h2]", "")
-    text = text.replace("[p]", "")
-    text = text.replace("[b]", "")
-    text = text.replace("[a]", "")
-
-    # 🔥 Eliminar todo desde "Patrocinado:"
+    # Remove sponsored section first (before tag replacements)
     text = re.split(r"Patrocinado:", text, flags=re.IGNORECASE)[0]
 
-    # Normalizar espacios
+    # Structural replacements: close tag -> separator, open tag -> delete
+    TAG_REPLACEMENTS = {
+        "[/h2]": ". ", "[/p]": " ", "[/b]": "", "[/a]": "",
+        "[h2]": "", "[p]": "", "[b]": "", "[a]": "",
+    }
+    for tag, replacement in TAG_REPLACEMENTS.items():
+        text = text.replace(tag, replacement)
+
+    # Remove remaining opening pseudo-tags like [a ...]
+    text = re.sub(r"\[a[^\]]*\]", "", text)
+
+    # Normalize whitespace
     text = text.replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text)
 
@@ -352,14 +338,6 @@ def fetch_match_standings_overunder(event_id: str, sub_type: str = "2.5", stype:
     )
 
 
-def fetch_match_standings_htft(event_id: str, stype: str = "overall") -> Optional[List]:
-    """Get HT/FT standings for the match context."""
-    return api_get(
-        "/matches/standings/ht-ft",
-        params={"match_id": event_id, "type": stype},
-    )
-
-
 def fetch_match_top_scorers(event_id: str) -> Optional[List]:
     """Get top scorers related to the match."""
     return api_get("/matches/standings/top-scorers", params={"match_id": event_id})
@@ -376,6 +354,50 @@ def fetch_tournament_top_scorers(tournament_id: str, tournament_stage_id: str) -
 # =============================================================================
 # NORMALIZE FUNCTIONS
 # =============================================================================
+
+def _extract_1x2_odds(market_group: Dict, home_epid: str, away_epid: str) -> tuple:
+    """Extract 1X2 odds. Returns (home, draw, away) odds."""
+    home_odd, draw_odd, away_odd = None, None, None
+    for odd in market_group.get("odds", []):
+        epid = odd.get("eventParticipantId")
+        val = parse_odd(odd.get("value"))
+        if epid == home_epid:
+            home_odd = best_odd(home_odd, val)
+        elif epid == away_epid:
+            away_odd = best_odd(away_odd, val)
+        elif epid is None:
+            draw_odd = best_odd(draw_odd, val)
+    return home_odd, draw_odd, away_odd
+
+
+def _extract_overunder_odds(market_group: Dict) -> tuple:
+    """Extract Over/Under 2.5 odds. Returns (over_25, under_25)."""
+    over_odd, under_odd = None, None
+    for odd in market_group.get("odds", []):
+        handicap = odd.get("handicap") or {}
+        line = str(handicap.get("value", ""))
+        sel = (odd.get("selection") or "").upper()
+        val = parse_odd(odd.get("value"))
+        if line == "2.5":
+            if sel == "OVER":
+                over_odd = best_odd(over_odd, val)
+            elif sel == "UNDER":
+                under_odd = best_odd(under_odd, val)
+    return over_odd, under_odd
+
+
+def _extract_btts_odds(market_group: Dict) -> tuple:
+    """Extract BTTS odds. Returns (btts_yes, btts_no)."""
+    yes_odd, no_odd = None, None
+    for odd in market_group.get("odds", []):
+        btts = odd.get("bothTeamsToScore")
+        val = parse_odd(odd.get("value"))
+        if btts is True:
+            yes_odd = best_odd(yes_odd, val)
+        elif btts is False:
+            no_odd = best_odd(no_odd, val)
+    return yes_odd, no_odd
+
 
 def normalize_odds(odds_data: List, home_epid: str, away_epid: str) -> Dict:
     """
@@ -408,38 +430,20 @@ def normalize_odds(odds_data: List, home_epid: str, away_epid: str) -> Dict:
             all_markets.add(key)
 
             if betting_type == "HOME_DRAW_AWAY" and scope == "FULL_TIME":
-                for odd in market_group.get("odds", []):
-                    epid = odd.get("eventParticipantId")
-                    val = parse_odd(odd.get("value"))
-                    if epid == home_epid:
-                        result["odds_home"] = best_odd(result["odds_home"], val)
-                    elif epid == away_epid:
-                        result["odds_away"] = best_odd(result["odds_away"], val)
-                    elif epid is None:
-                        result["odds_draw"] = best_odd(result["odds_draw"], val)
+                h, d, a = _extract_1x2_odds(market_group, home_epid, away_epid)
+                result["odds_home"] = best_odd(result["odds_home"], h)
+                result["odds_draw"] = best_odd(result["odds_draw"], d)
+                result["odds_away"] = best_odd(result["odds_away"], a)
 
             elif betting_type == "OVER_UNDER" and scope == "FULL_TIME":
-                # Line (e.g. 2.5) is in handicap.value, selection is OVER/UNDER
-                for odd in market_group.get("odds", []):
-                    handicap = odd.get("handicap") or {}
-                    line = str(handicap.get("value", ""))
-                    sel = (odd.get("selection") or "").upper()
-                    val = parse_odd(odd.get("value"))
-                    if line == "2.5":
-                        if sel == "OVER":
-                            result["odds_over_25"] = best_odd(result["odds_over_25"], val)
-                        elif sel == "UNDER":
-                            result["odds_under_25"] = best_odd(result["odds_under_25"], val)
+                o, u = _extract_overunder_odds(market_group)
+                result["odds_over_25"] = best_odd(result["odds_over_25"], o)
+                result["odds_under_25"] = best_odd(result["odds_under_25"], u)
 
             elif betting_type == "BOTH_TEAMS_TO_SCORE" and scope == "FULL_TIME":
-                for odd in market_group.get("odds", []):
-                    btts = odd.get("bothTeamsToScore")
-                    val = parse_odd(odd.get("value"))
-            
-                    if btts is True:
-                        result["odds_btts_yes"] = best_odd(result["odds_btts_yes"], val)
-                    elif btts is False:
-                        result["odds_btts_no"] = best_odd(result["odds_btts_no"], val)
+                y, n = _extract_btts_odds(market_group)
+                result["odds_btts_yes"] = best_odd(result["odds_btts_yes"], y)
+                result["odds_btts_no"] = best_odd(result["odds_btts_no"], n)
 
     result["available_markets"] = sorted(list(all_markets))
     return result
@@ -481,112 +485,51 @@ def normalize_implied_probs(odds_data: Dict) -> Dict:
     return probs
 
 
-def normalize_h2h(h2h_data: List) -> Dict:
+def _resolve_goals(m: Dict) -> tuple:
     """
-    Normalize H2H matches.
-    Discard incoherent matches (e.g., score parse fails).
-    Returns list of valid matches + summary stats.
+    Extract goals_for, goals_against, total_goals from a match record.
+    Supports two formats:
+    - h2h: home_score, away_score + team_is_home
+    - team results: goals_for, goals_against + total_goals
+    Returns (goals_for, goals_against, total_goals).
     """
-    if not h2h_data:
-        return {"matches": [], "summary": None, "warnings": ["H2H data not available [N/A]"]}
+    if "home_score" in m and "away_score" in m:
+        is_home = m.get("team_is_home", True)
+        hs = m.get("home_score", 0) or 0
+        aw = m.get("away_score", 0) or 0
+        return (hs if is_home else aw), (aw if is_home else hs), hs + aw
+    return (
+        m.get("goals_for", 0) or 0,
+        m.get("goals_against", 0) or 0,
+        m.get("total_goals", 0),
+    )
 
-    matches = []
-    home_wins, away_wins, draws = 0, 0, 0
-    total_goals = 0
-    warnings = []
 
-    for match in h2h_data:
-        try:
-            scores = match.get("scores", {})
-            home_score = int(scores.get("home", 0) or 0)
-            away_score = int(scores.get("away", 0) or 0)
-        except (TypeError, ValueError):
-            warnings.append(f"Skipped H2H record with unparseable score: {match.get('match_id')}")
-            continue
-
-        if home_score is None or away_score is None:
-            continue
-
-        total_goals += home_score + away_score
-        status = match.get("status", "").upper()
-        tournament = match.get("tournament_name", "")
-
-        matches.append({
-            "match_id": match.get("match_id"),
-            "timestamp": match.get("timestamp"),
-            "tournament": None if not tournament else tournament,
-            "home_team": match.get("home_team", {}).get("name"),
-            "away_team": match.get("away_team", {}).get("name"),
-            "home_score": home_score,
-            "away_score": away_score,
-            "status": None if not status else status,
-        })
-
-        if status == "W":
-            home_wins += 1
-        elif status == "L":
-            away_wins += 1
-        else:
-            draws += 1
-
-    total = len(matches)
-    avg_goals = round(total_goals / total, 2) if total > 0 else None
-
-    summary = None
-    if total > 0:
-        summary = {
-            "total_matches": total,
-            "home_wins": home_wins,
-            "draws": draws,
-            "away_wins": away_wins,
-            "avg_goals": avg_goals,
+def _compute_results_basic_stats(matches: List[Dict]) -> Dict:
+    """
+    Compute basic stats (all_matches, form_string, points, gf_avg, gc_avg,
+    over_25_freq, btts_freq, home_*/away_*) from a list of matches.
+    """
+    n = len(matches)
+    if n == 0:
+        return {
+            "all_matches": 0, "form_string": None, "points": 0,
+            "gf_avg": None, "gc_avg": None,
+            "over_25_freq": None, "btts_freq": None,
         }
 
-    return {
-        "matches": matches,
-        "summary": summary,
-        "warnings": [] if not warnings else warnings,
-    }
-
-
-def _compute_results_basic_stats(matches: List[Dict], label: str = "") -> Dict:
-    """
-    Compute form.basic stats (all_matches, form_string, points, gf_avg, gc_avg,
-    over_25_freq, btts_freq, home_*/away_*) from a list of matches.
-    Supports two formats:
-    - team_home_results/away_results: goals_for, goals_against, total_goals
-    - h2h: home_score, away_score, team_is_home (computes goals_for from orientation)
-    Used by both normalize_team_results and build_h2h_from_results.
-    """
-    form_records = []
-    pts = 0
-    gf = 0
-    gc = 0
-    over_count = 0
-    btts_count = 0
+    form_records, pts = [], 0
+    gf, gc = 0, 0
+    over_count, btts_count = 0, 0
 
     for m in matches:
-        is_home = m.get("team_is_home", True)
-        # h2h format: home_score, away_score
-        if "home_score" in m and "away_score" in m:
-            hs = m.get("home_score", 0) or 0
-            aw = m.get("away_score", 0) or 0
-            goals_for = hs if is_home else aw
-            goals_against = aw if is_home else hs
-            total_goals = hs + aw
-        # team results format: goals_for, goals_against
-        else:
-            goals_for = m.get("goals_for", 0) or 0
-            goals_against = m.get("goals_against", 0) or 0
-            total_goals = m.get("total_goals", goals_for + goals_against)
-
+        goals_for, goals_against, total_goals = _resolve_goals(m)
         gf += goals_for
         gc += goals_against
         if total_goals > 2.5:
             over_count += 1
         if goals_for > 0 and goals_against > 0:
             btts_count += 1
-
         if goals_for > goals_against:
             form_records.append("W")
             pts += 3
@@ -596,58 +539,40 @@ def _compute_results_basic_stats(matches: List[Dict], label: str = "") -> Dict:
         else:
             form_records.append("L")
 
-    n = len(matches)
-    form_string = "".join(form_records) if form_records else None
-
     result = {
         "all_matches": n,
-        "form_string": form_string,
+        "form_string": "".join(form_records) or None,
         "points": pts,
-        "gf_avg": round(gf / n, 2) if n > 0 else None,
-        "gc_avg": round(gc / n, 2) if n > 0 else None,
-        "over_25_freq": f"{over_count}/{n}" if n > 0 else None,
-        "btts_freq": f"{btts_count}/{n}" if n > 0 else None,
+        "gf_avg": round(gf / n, 2),
+        "gc_avg": round(gc / n, 2),
+        "over_25_freq": f"{over_count}/{n}",
+        "btts_freq": f"{btts_count}/{n}",
     }
 
-    # Home / away split
     home_matches = [m for m in matches if m.get("team_is_home")]
     away_matches = [m for m in matches if not m.get("team_is_home")]
 
-    def _get_gf_gc(m: Dict):
-        is_home = m.get("team_is_home", True)
-        if "home_score" in m and "away_score" in m:
-            hs = m.get("home_score", 0) or 0
-            aw = m.get("away_score", 0) or 0
-            return (hs if is_home else aw), (aw if is_home else hs)
-        return m.get("goals_for", 0) or 0, m.get("goals_against", 0) or 0
-
     if home_matches:
-        h_pts = 0
-        h_gf = sum(_get_gf_gc(m)[0] for m in home_matches)
-        h_gc = sum(_get_gf_gc(m)[1] for m in home_matches)
-        for m in home_matches:
-            gf_m, gc_m = _get_gf_gc(m)
-            if gf_m > gc_m:
-                h_pts += 3
-            elif gf_m == gc_m:
-                h_pts += 1
-        result["home_ppg"] = round(h_pts / len(home_matches), 2)
-        result["home_gf_avg"] = round(h_gf / len(home_matches), 2)
-        result["home_gc_avg"] = round(h_gc / len(home_matches), 2)
+        h_gf = sum(_resolve_goals(m)[0] for m in home_matches)
+        h_gc = sum(_resolve_goals(m)[1] for m in home_matches)
+        h_pts = sum(3 if _resolve_goals(m)[0] > _resolve_goals(m)[1]
+                    else 1 if _resolve_goals(m)[0] == _resolve_goals(m)[1]
+                    else 0 for m in home_matches)
+        k = len(home_matches)
+        result["home_ppg"] = round(h_pts / k, 2)
+        result["home_gf_avg"] = round(h_gf / k, 2)
+        result["home_gc_avg"] = round(h_gc / k, 2)
 
     if away_matches:
-        a_pts = 0
-        a_gf = sum(_get_gf_gc(m)[0] for m in away_matches)
-        a_gc = sum(_get_gf_gc(m)[1] for m in away_matches)
-        for m in away_matches:
-            gf_m, gc_m = _get_gf_gc(m)
-            if gf_m > gc_m:
-                a_pts += 3
-            elif gf_m == gc_m:
-                a_pts += 1
-        result["away_ppg"] = round(a_pts / len(away_matches), 2)
-        result["away_gf_avg"] = round(a_gf / len(away_matches), 2)
-        result["away_gc_avg"] = round(a_gc / len(away_matches), 2)
+        a_gf = sum(_resolve_goals(m)[0] for m in away_matches)
+        a_gc = sum(_resolve_goals(m)[1] for m in away_matches)
+        a_pts = sum(3 if _resolve_goals(m)[0] > _resolve_goals(m)[1]
+                    else 1 if _resolve_goals(m)[0] == _resolve_goals(m)[1]
+                    else 0 for m in away_matches)
+        k = len(away_matches)
+        result["away_ppg"] = round(a_pts / k, 2)
+        result["away_gf_avg"] = round(a_gf / k, 2)
+        result["away_gc_avg"] = round(a_gc / k, 2)
 
     return result
 
@@ -733,44 +658,12 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
 
     matches = sorted(match_map.values(), key=lambda r: r.get("timestamp") or 0, reverse=True)
 
-    total_goals = 0
-    home_wins, away_wins, draws = 0, 0, 0
-
-    # Also compute per-match goals_for/goals_against for form.basic
-    for r in matches:
-        gf = r.get("goals_for", 0)
-        gc = r.get("goals_against", 0)
-        total_goals += gf + gc
-
-        # Ojo: aquí "home_wins" y "away_wins" significan local/visitante real,
-        # NO team_home vs team_away del análisis
-        if gf > gc:
-            home_wins += 1
-        elif gf == gc:
-            draws += 1
-        else:
-            away_wins += 1
-
-    total = len(matches)
-    avg_goals = round(total_goals / total, 2) if total > 0 else None
-
-    summary = None
-    if total > 0:
-        summary = {
-            "total_matches": total,
-            "home_wins": home_wins,
-            "draws": draws,
-            "away_wins": away_wins,
-            "avg_goals": avg_goals,
-        }
-
     # Compute form.basic from h2h matches (with team_is_home orientation)
-    form_basic = _compute_results_basic_stats(matches, "h2h")
+    form_basic = _compute_results_basic_stats(matches)
 
     return {
         "matches": matches,
-        "summary": summary,
-        "form": {"basic": form_basic},   # advanced added later via compute_advanced_form
+        "basic_stats": form_basic,
         "warnings": [],
     }
 
@@ -843,11 +736,11 @@ def normalize_team_results(team_results_data: Dict, team_name: str, team_id: str
     all_matches = all_matches[:MAX_MATCHES]
 
     # Compute basic stats via shared helper
-    basic_stats = _compute_results_basic_stats(all_matches, team_name)
+    basic_stats = _compute_results_basic_stats(all_matches)
 
     result = {
         "matches": all_matches,
-        "form": {"basic": basic_stats},
+        "basic_stats": basic_stats,
         "warnings": [],
     }
 
@@ -1005,232 +898,206 @@ def normalize_advanced_stats(raw_stats: Optional[Dict], *, team_is_home: bool = 
     return result
 
 
-def normalize_advanced_stats_flat(raw_stats: Optional[Dict]) -> Dict:
-    """
-    Flat array format for the current match's advanced_stats.
-    Returns {match: [{name, home_team, away_team}, ...],
-             1st-half: [...], 2nd-half: [...], warnings: []}.
-    """
-    result = {
-        "match": [],
-        "1st-half": [],
-        "2nd-half": [],
-        "warnings": [],
-    }
-
-    if not raw_stats:
-        result["warnings"].append("Match stats not available [N/A]")
-        return result
-
-    for period_key in ("match", "1st-half", "2nd-half"):
-        period_data = raw_stats.get(period_key, [])
-        if not isinstance(period_data, list):
-            continue
-
-        seen_names: set = set()
-        for item in period_data:
-            if not isinstance(item, dict):
-                continue
-            stat_name = item.get("name")
-            if not stat_name or stat_name in seen_names:
-                continue
-            seen_names.add(stat_name)
-
-            home_val = item.get("home_team")
-            away_val = item.get("away_team")
-
-            result[period_key].append({
-                "name": stat_name,
-                "home_team": home_val,
-                "away_team": away_val,
-            })
-
-    return result
-
-
+# =============================================================================
 # =============================================================================
 # ADVANCED FORM AGGREGATION
 # =============================================================================
 
-def compute_category_averages(matches: List[Dict], period: str) -> Dict:
-    """Computes category averages for a given period."""
-
-    def get_stat(match: Dict, key: str, side: str, sub_key: str = None) -> Any:
-        """Get stat from match's advanced_stats, handling nested pass structures."""
-        stats = match.get("advanced_stats", {}).get(period, {})
+def _avg_stat(matches, period, key, side, sub_key=None):
+    vals = []
+    for m in matches:
+        stats = m.get('advanced_stats', {}).get(period, {})
         val = stats.get(key, {}).get(side)
         if sub_key and isinstance(val, dict):
-            return val.get(sub_key)
-        return val
+            val = val.get(sub_key)
+        if val is not None:
+            vals.append(val)
+    return round(sum(vals) / len(vals), 2) if vals else None
 
-    def avg_single(key, side, sub_key=None):
-        vals = []
-        for m in matches:
-            v = get_stat(m, key, side, sub_key)
-            if v is not None:
-                vals.append(v)
-        return round(sum(vals) / len(vals), 2) if vals else None
 
-    def avg_goals(side: str) -> Optional[float]:
-        """Read goals directly from match result (goals_for/goals_against), not from stats."""
-        vals = []
-        for m in matches:
-            v = m.get("goals_for") if side == "for" else m.get("goals_against")
-            if v is not None:
-                vals.append(v)
-        return round(sum(vals) / len(vals), 2) if vals else None
+def _avg_goals_from_result(matches, side):
+    key = 'goals_for' if side == 'for' else 'goals_against'
+    vals = [m.get(key) for m in matches if m.get(key) is not None]
+    return round(sum(vals) / len(vals), 2) if vals else None
 
-    def avg_bc_conversion() -> Optional[float]:
-        """Big chance conversion: goals_from_result / big_chances_from_stats per match, averaged."""
-        vals = []
-        for m in matches:
-            bc = get_stat(m, "big_chances", "for")
-            gf_match = m.get("goals_for")
-            if bc is not None and bc > 0 and gf_match is not None:
-                vals.append(gf_match / bc)
-        return round(sum(vals) / len(vals) * 100, 2) if vals else None
 
-    # attack — "goals" no existe en el endpoint de stats; Goals viene del resultado del partido, no de stats
-    attack = {
-        "goals_for_avg": avg_goals("for"),
-        "xg_for_avg": avg_single("xg", "for"),
-        "xgot_for_avg": avg_single("xgot", "for"),
-        "xa_for_avg": avg_single("xa", "for"),
-        "shots_for_avg": avg_single("shots", "for"),
-        "shots_on_target_for_avg": avg_single("shots_on_target", "for"),
-        "shots_off_target_for_avg": avg_single("shots_off_target", "for"),
-        "blocked_shots_for_avg": avg_single("blocked_shots", "for"),
-        "shots_inside_box_for_avg": avg_single("shots_inside_box", "for"),
-        "shots_outside_box_for_avg": avg_single("shots_outside_box", "for"),
-        "big_chances_for_avg": avg_single("big_chances", "for"),
-        "touches_in_opposition_box_avg": avg_single("touches_in_opposition_box", "for"),
-        "hit_woodwork_avg": avg_single("hit_woodwork", "for"),
+def _avg_bc_conversion(matches, period):
+    vals = []
+    for m in matches:
+        bc = m.get('advanced_stats', {}).get(period, {}).get('big_chances', {}).get('for')
+        gf = m.get('goals_for')
+        if bc is not None and bc > 0 and gf is not None:
+            vals.append(gf / bc)
+    return round(sum(vals) / len(vals) * 100, 2) if vals else None
+
+
+def _safe(val, default=0.0):
+    return val if val is not None else default
+
+
+def _category_attack(matches, period):
+    return {
+        'goals_for_avg': _avg_goals_from_result(matches, 'for'),
+        'xg_for_avg': _avg_stat(matches, period, 'xg', 'for'),
+        'xgot_for_avg': _avg_stat(matches, period, 'xgot', 'for'),
+        'xa_for_avg': _avg_stat(matches, period, 'xa', 'for'),
+        'shots_for_avg': _avg_stat(matches, period, 'shots', 'for'),
+        'shots_on_target_for_avg': _avg_stat(matches, period, 'shots_on_target', 'for'),
+        'shots_off_target_for_avg': _avg_stat(matches, period, 'shots_off_target', 'for'),
+        'blocked_shots_for_avg': _avg_stat(matches, period, 'blocked_shots', 'for'),
+        'shots_inside_box_for_avg': _avg_stat(matches, period, 'shots_inside_box', 'for'),
+        'shots_outside_box_for_avg': _avg_stat(matches, period, 'shots_outside_box', 'for'),
+        'big_chances_for_avg': _avg_stat(matches, period, 'big_chances', 'for'),
+        'touches_in_opposition_box_avg': _avg_stat(matches, period, 'touches_in_opposition_box', 'for'),
+        'hit_woodwork_avg': _avg_stat(matches, period, 'hit_woodwork', 'for'),
     }
 
-    # defense — "goals" no existe en el endpoint de stats
-    defense = {
-        "goals_against_avg": avg_goals("against"),  # viene del resultado del partido
-        "xg_against_avg": avg_single("xg", "against"),
-        "xgot_faced_avg": avg_single("xgot_faced", "for"),  # el endpoint trae "xGOT faced" como stat propio
-        "shots_against_avg": avg_single("shots", "against"),
-        "shots_on_target_against_avg": avg_single("shots_on_target", "against"),
-        "shots_off_target_against_avg": avg_single("shots_off_target", "against"),
-        "blocked_shots_against_avg": avg_single("blocked_shots", "against"),
-        "shots_inside_box_against_avg": avg_single("shots_inside_box", "against"),
-        "shots_outside_box_against_avg": avg_single("shots_outside_box", "against"),
-        "big_chances_against_avg": avg_single("big_chances", "against"),
-        "touches_in_opposition_box_against_avg": avg_single("touches_in_opposition_box", "against"),
-        "goalkeeper_saves_avg": avg_single("goalkeeper_saves", "for"),  # propias atajadas del equipo
-        "errors_leading_to_shot_avg": avg_single("errors_leading_to_shot", "for"),
-        "errors_leading_to_goal_avg": avg_single("errors_leading_to_goal", "for"),
-        "goals_prevented_avg": avg_single("goals_prevented", "for"),  # propio xGOT faced
+
+def _category_defense(matches, period):
+    return {
+        'goals_against_avg': _avg_goals_from_result(matches, 'against'),
+        'xg_against_avg': _avg_stat(matches, period, 'xg', 'against'),
+        'xgot_faced_avg': _avg_stat(matches, period, 'xgot_faced', 'for'),
+        'shots_against_avg': _avg_stat(matches, period, 'shots', 'against'),
+        'shots_on_target_against_avg': _avg_stat(matches, period, 'shots_on_target', 'against'),
+        'shots_off_target_against_avg': _avg_stat(matches, period, 'shots_off_target', 'against'),
+        'blocked_shots_against_avg': _avg_stat(matches, period, 'blocked_shots', 'against'),
+        'shots_inside_box_against_avg': _avg_stat(matches, period, 'shots_inside_box', 'against'),
+        'shots_outside_box_against_avg': _avg_stat(matches, period, 'shots_outside_box', 'against'),
+        'big_chances_against_avg': _avg_stat(matches, period, 'big_chances', 'against'),
+        'touches_in_opposition_box_against_avg': _avg_stat(matches, period, 'touches_in_opposition_box', 'against'),
+        'goalkeeper_saves_avg': _avg_stat(matches, period, 'goalkeeper_saves', 'for'),
+        'errors_leading_to_shot_avg': _avg_stat(matches, period, 'errors_leading_to_shot', 'for'),
+        'errors_leading_to_goal_avg': _avg_stat(matches, period, 'errors_leading_to_goal', 'for'),
+        'goals_prevented_avg': _avg_stat(matches, period, 'goals_prevented', 'for'),
     }
 
-    # control
-    control = {
-        "possession_avg": avg_single("possession", "for"),
-        "passes_accuracy_avg": avg_single("passes", "for", "pct"),
-        "passes_completed_avg": avg_single("passes", "for", "completed"),
-        "passes_attempted_avg": avg_single("passes", "for", "attempted"),
-        "long_pass_accuracy_avg": avg_single("long_passes", "for", "pct"),
-        "long_passes_completed_avg": avg_single("long_passes", "for", "completed"),
-        "long_passes_attempted_avg": avg_single("long_passes", "for", "attempted"),
-        "final_third_pass_accuracy_avg": avg_single("passes_final_third", "for", "pct"),
-        "final_third_passes_completed_avg": avg_single("passes_final_third", "for", "completed"),
-        "final_third_passes_attempted_avg": avg_single("passes_final_third", "for", "attempted"),
-        "accurate_through_passes_avg": avg_single("accurate_through_passes", "for"),
+
+def _category_control(matches, period):
+    return {
+        'possession_avg': _avg_stat(matches, period, 'possession', 'for'),
+        'passes_accuracy_avg': _avg_stat(matches, period, 'passes', 'for', 'pct'),
+        'passes_completed_avg': _avg_stat(matches, period, 'passes', 'for', 'completed'),
+        'passes_attempted_avg': _avg_stat(matches, period, 'passes', 'for', 'attempted'),
+        'long_pass_accuracy_avg': _avg_stat(matches, period, 'long_passes', 'for', 'pct'),
+        'long_passes_completed_avg': _avg_stat(matches, period, 'long_passes', 'for', 'completed'),
+        'long_passes_attempted_avg': _avg_stat(matches, period, 'long_passes', 'for', 'attempted'),
+        'final_third_pass_accuracy_avg': _avg_stat(matches, period, 'passes_final_third', 'for', 'pct'),
+        'final_third_passes_completed_avg': _avg_stat(matches, period, 'passes_final_third', 'for', 'completed'),
+        'final_third_passes_attempted_avg': _avg_stat(matches, period, 'passes_final_third', 'for', 'attempted'),
+        'accurate_through_passes_avg': _avg_stat(matches, period, 'accurate_through_passes', 'for'),
     }
 
-    # set_pieces_and_territory
-    set_pieces_and_territory = {
-        "corners_for_avg": avg_single("corners", "for"),
-        "corners_against_avg": avg_single("corners", "against"),
-        "offsides_for_avg": avg_single("offsides", "for"),
-        "offsides_against_avg": avg_single("offsides", "against"),
-        "free_kicks_for_avg": avg_single("free_kicks", "for"),
-        "free_kicks_against_avg": avg_single("free_kicks", "against"),
-        "throw_ins_for_avg": avg_single("throw_ins", "for"),
-        "throw_ins_against_avg": avg_single("throw_ins", "against"),
-        "cross_accuracy_avg": avg_single("crosses", "for", "pct"),
-        "crosses_completed_avg": avg_single("crosses", "for", "completed"),
-        "crosses_attempted_avg": avg_single("crosses", "for", "attempted"),
+
+def _category_set_pieces(matches, period):
+    return {
+        'corners_for_avg': _avg_stat(matches, period, 'corners', 'for'),
+        'corners_against_avg': _avg_stat(matches, period, 'corners', 'against'),
+        'offsides_for_avg': _avg_stat(matches, period, 'offsides', 'for'),
+        'offsides_against_avg': _avg_stat(matches, period, 'offsides', 'against'),
+        'free_kicks_for_avg': _avg_stat(matches, period, 'free_kicks', 'for'),
+        'free_kicks_against_avg': _avg_stat(matches, period, 'free_kicks', 'against'),
+        'throw_ins_for_avg': _avg_stat(matches, period, 'throw_ins', 'for'),
+        'throw_ins_against_avg': _avg_stat(matches, period, 'throw_ins', 'against'),
+        'cross_accuracy_avg': _avg_stat(matches, period, 'crosses', 'for', 'pct'),
+        'crosses_completed_avg': _avg_stat(matches, period, 'crosses', 'for', 'completed'),
+        'crosses_attempted_avg': _avg_stat(matches, period, 'crosses', 'for', 'attempted'),
     }
 
-    # discipline — only own team cards; treat missing red cards as 0 (no data ≠ no red cards)
-    yellow_cards_for_avg = avg_single("yellow_cards", "for")
-    yellow_cards_against_avg = avg_single("yellow_cards", "against")  # kept for derived calc
-    red_cards_for_avg = avg_single("red_cards", "for")
-    if red_cards_for_avg is None and yellow_cards_for_avg is not None:
-        red_cards_for_avg = 0.0
-    discipline = {
-        "yellow_cards_avg": yellow_cards_for_avg,
-        "red_cards_avg": red_cards_for_avg,
-        "cards_total_avg": round(yellow_cards_for_avg + red_cards_for_avg, 2) if yellow_cards_for_avg is not None and red_cards_for_avg is not None else (yellow_cards_for_avg or red_cards_for_avg or 0.0),
-        "fouls_committed_avg": avg_single("fouls", "for"),
+
+def _category_discipline(matches, period):
+    yf = _avg_stat(matches, period, 'yellow_cards', 'for')
+    ya = _avg_stat(matches, period, 'yellow_cards', 'against')
+    rf = _avg_stat(matches, period, 'red_cards', 'for')
+    if rf is None and yf is not None:
+        rf = 0.0
+    if yf is not None and rf is not None:
+        cards_total = round(yf + rf, 2)
+    elif yf is not None:
+        cards_total = yf
+    elif rf is not None:
+        cards_total = rf
+    else:
+        cards_total = 0.0
+    return {
+        'yellow_cards_avg': yf,
+        'red_cards_avg': rf,
+        'cards_total_avg': cards_total,
+        'fouls_committed_avg': _avg_stat(matches, period, 'fouls', 'for'),
     }
 
-    # duels_and_defending
-    duels_and_defending = {
-        "tackles_success_pct_avg": avg_single("tackles", "for", "pct"),
-        "tackles_won_avg": avg_single("tackles", "for", "completed"),
-        "tackles_attempted_avg": avg_single("tackles", "for", "attempted"),
-        "duels_won_avg": avg_single("duels_won", "for"),
-        "clearances_avg": avg_single("clearances", "for"),
-        "interceptions_avg": avg_single("interceptions", "for"),
+
+def _category_duels(matches, period):
+    return {
+        'tackles_success_pct_avg': _avg_stat(matches, period, 'tackles', 'for', 'pct'),
+        'tackles_won_avg': _avg_stat(matches, period, 'tackles', 'for', 'completed'),
+        'tackles_attempted_avg': _avg_stat(matches, period, 'tackles', 'for', 'attempted'),
+        'duels_won_avg': _avg_stat(matches, period, 'duels_won', 'for'),
+        'clearances_avg': _avg_stat(matches, period, 'clearances', 'for'),
+        'interceptions_avg': _avg_stat(matches, period, 'interceptions', 'for'),
     }
 
-    # efficiency
-    sf = avg_single("shots", "for")
-    sot_f = avg_single("shots_on_target", "for")
-    sot_against = avg_single("shots_on_target", "against")
-    xgf = avg_single("xg", "for")
-    xga = avg_single("xg", "against")
-    bcf = avg_single("big_chances", "for")
-    saves_f = avg_single("goalkeeper_saves", "for")
-    gf = avg_goals("for")
-    ga = avg_goals("against")
-    efficiency = {
-        "shot_accuracy_pct": round(sot_f / sf * 100, 2) if sot_f is not None and sf is not None and sf > 0 else None,
-        "goal_conversion_pct": min(round(gf / sf * 100, 2), 100.0) if gf is not None and sf is not None and sf > 0 else None,
-        "big_chance_conversion_pct": avg_bc_conversion(),
-        "xg_per_shot": round(xgf / sf, 2) if xgf is not None and sf is not None and sf > 0 else None,
-        "shots_on_target_faced_per_goal_against": (
-            None if ga == 0 else round(sot_against / ga, 2)
-        ) if sot_against is not None and ga is not None else None,
-        "save_pct": round(saves_f / sot_against * 100, 2) if saves_f is not None and sot_against is not None and sot_against > 0 else None,
-        "finishing_overperformance": round(gf - xgf, 2) if gf is not None and xgf is not None else None,
-        "conceding_overperformance": round(ga - xga, 2) if ga is not None and xga is not None else None,
-    }
 
-    # derived
-    shots_against_val = avg_single("shots", "against")
-    shots_on_against_val = avg_single("shots_on_target", "against")
-    big_chances_against_val = avg_single("big_chances", "against")
-    corners_for_val = avg_single("corners", "for")
-    corners_against_val = avg_single("corners", "against")
+def _category_efficiency(matches, period):
+    sf = _avg_stat(matches, period, 'shots', 'for')
+    sot_f = _avg_stat(matches, period, 'shots_on_target', 'for')
+    sot_a = _avg_stat(matches, period, 'shots_on_target', 'against')
+    xgf = _avg_stat(matches, period, 'xg', 'for')
+    xga = _avg_stat(matches, period, 'xg', 'against')
+    bcf = _avg_stat(matches, period, 'big_chances', 'for')
+    sv_f = _avg_stat(matches, period, 'goalkeeper_saves', 'for')
+    gf = _avg_goals_from_result(matches, 'for')
+    ga = _avg_goals_from_result(matches, 'against')
 
-    def safe_derived(val):
-        return val if val is not None else 0
-
-    derived = {
-        "xg_balance_avg": round((safe_derived(xgf) - safe_derived(xga)), 2),
-        "xg_ratio": round(xgf / safe_derived(xga), 2) if xga and xga > 0 else None,
-        "shots_share": round(sf / (sf + safe_derived(shots_against_val)), 2) if sf and sf > 0 else None,
-        "shots_on_target_share": round(sot_f / (sot_f + safe_derived(shots_on_against_val)), 2) if sot_f and sot_f > 0 else None,
-        "big_chances_balance_avg": round((bcf - safe_derived(big_chances_against_val)), 2) if bcf is not None else None,
-        "corners_balance_avg": round((corners_for_val - safe_derived(corners_against_val)), 2) if corners_for_val is not None else None,
-        "discipline_balance_avg": round((yellow_cards_for_avg - safe_derived(yellow_cards_against_avg)), 2) if yellow_cards_for_avg is not None else None,
-    }
+    def pct(a, b):
+        return round(a / b * 100, 2) if a is not None and b and b > 0 else None
 
     return {
-        "attack": attack,
-        "defense": defense,
-        "control": control,
-        "set_pieces_and_territory": set_pieces_and_territory,
-        "discipline": discipline,
-        "duels_and_defending": duels_and_defending,
-        "efficiency": efficiency,
-        "derived": derived,
+        'shot_accuracy_pct': pct(sot_f, sf),
+        'goal_conversion_pct': min(pct(gf, sf), 100.0) if gf is not None and sf and sf > 0 else None,
+        'big_chance_conversion_pct': _avg_bc_conversion(matches, period),
+        'xg_per_shot': round(xgf / sf, 2) if xgf is not None and sf and sf > 0 else None,
+        'shots_on_target_faced_per_goal_against': (None if ga == 0 else round(sot_a / ga, 2)) if sot_a is not None and ga is not None else None,
+        'save_pct': pct(sv_f, sot_a),
+        'finishing_overperformance': round(gf - xgf, 2) if gf is not None and xgf is not None else None,
+        'conceding_overperformance': round(ga - xga, 2) if ga is not None and xga is not None else None,
+    }
+
+
+def _category_derived(matches, period):
+    xgf = _avg_stat(matches, period, 'xg', 'for')
+    xga = _avg_stat(matches, period, 'xg', 'against')
+    sf = _avg_stat(matches, period, 'shots', 'for')
+    sot_f = _avg_stat(matches, period, 'shots_on_target', 'for')
+    sot_a = _avg_stat(matches, period, 'shots_on_target', 'against')
+    bcf = _avg_stat(matches, period, 'big_chances', 'for')
+    bca = _avg_stat(matches, period, 'big_chances', 'against')
+    cf = _avg_stat(matches, period, 'corners', 'for')
+    ca = _avg_stat(matches, period, 'corners', 'against')
+    ycf = _avg_stat(matches, period, 'yellow_cards', 'for')
+    yca = _avg_stat(matches, period, 'yellow_cards', 'against')
+    s = _safe
+    return {
+        'xg_balance_avg': round(s(xgf) - s(xga), 2),
+        'xg_ratio': round(xgf / s(xga), 2) if xga and xga > 0 else None,
+        'shots_share': round(sf / (sf + s(sot_a)), 2) if sf and sf > 0 else None,
+        'shots_on_target_share': round(sot_f / (sot_f + s(sot_a)), 2) if sot_f and sot_f > 0 else None,
+        'big_chances_balance_avg': round(s(bcf) - s(bca), 2) if bcf is not None else None,
+        'corners_balance_avg': round(s(cf) - s(ca), 2) if cf is not None else None,
+        'discipline_balance_avg': round(s(ycf) - s(yca), 2) if ycf is not None else None,
+    }
+
+
+def compute_category_averages(matches, period):
+    return {
+        'attack': _category_attack(matches, period),
+        'defense': _category_defense(matches, period),
+        'control': _category_control(matches, period),
+        'set_pieces_and_territory': _category_set_pieces(matches, period),
+        'discipline': _category_discipline(matches, period),
+        'duels_and_defending': _category_duels(matches, period),
+        'efficiency': _category_efficiency(matches, period),
+        'derived': _category_derived(matches, period),
     }
 
 
@@ -1360,7 +1227,7 @@ def compute_player_aggregates(players: List[Dict]) -> Dict:
         "red_cards_total": sum(g(p, "red_cards") for p in players),
     }
 
-    total_90 = total_minutes / 90.0
+    total_90 = total_minutes / PARTY_MINUTES
     totals["goals_per_90"] = round(totals["goals_total"] / total_90, 2) if total_90 > 0 else None
     totals["assists_per_90"] = round(totals["assists_total"] / total_90, 2) if total_90 > 0 else None
     totals["shots_per_90"] = round(totals["shots_total"] / total_90, 2) if total_90 > 0 else None
@@ -1532,42 +1399,6 @@ def normalize_lineups(lineup_data: Any) -> Dict:
 
     return result
 
-def normalize_summary(summary_data: Any) -> Dict:
-    """
-    Normalize match summary data (goals, cards, etc.) into a structured format.
-    Adds `type` from event kind and `goals_home`/`goals_away` totals.
-    """
-    if not summary_data:
-        return {"events": [], "warnings": ["Match summary not available [N/A]"]}
-
-    events = []
-    for event in summary_data:
-        kind = event.get("kind") or ""
-        if "goal" in kind.lower():
-            evt_type = "goal"
-        elif "yellow" in kind.lower():
-            evt_type = "yellow_card"
-        elif "red" in kind.lower():
-            evt_type = "red_card"
-        elif "substitution" in kind.lower() or "change" in kind.lower():
-            evt_type = "substitution"
-        elif "penalty" in kind.lower():
-            evt_type = "penalty"
-        elif "var" in kind.lower():
-            evt_type = "var"
-        else:
-            evt_type = "other"
-
-        events.append({
-            "type": evt_type,
-            "minutes": event.get("minutes"),
-            "description": event.get("description") or "",
-            "team": event.get("team") or "",
-            "players": [{"name": p.get("name"), "type": p.get("type")} for p in event.get("players", [])],
-        })
-
-    return {"events": events, "warnings": []}
-
 def normalize_standings(standings_data: List, team_ids: set) -> Dict:
     """
     Extract standings rows for the two teams in the match.
@@ -1675,65 +1506,6 @@ def normalize_top_scorers(scorers_data: List, team_ids: set) -> Dict:
 # AGGREGATE / CROSS-FUNCTION INDICATORS
 # =============================================================================
 
-def compute_offensive_dependency(player_stats: Dict, team_results: Dict, top_scorers: Dict) -> List[Dict]:
-    """
-    Compute offensive dependency: what % of team goals does each top scorer represent.
-    Returns list of {player, team, goals_team, goals_player, pct, dependency_level}.
-    """
-    indicators = []
-
-    for side in ["home", "away"]:
-        scorers = top_scorers.get(f"{side}_scorers", [])
-        results = team_results.get(side, {})
-        form = results.get("form", {})
-        total_gf = form.get("gf_avg") or 0
-        n = form.get("last_n", 0)
-        total_goals_team = (total_gf * n) if total_gf and n else 0
-
-        for s in scorers[:3]:
-            goals_p = s.get("goals", 0)
-            if total_goals_team > 0:
-                pct = round((goals_p / total_goals_team) * 100, 1)
-            else:
-                pct = None
-
-            dep_level = None
-            if pct is not None:
-                if pct > 50:
-                    dep_level = "alta"
-                elif pct > 30:
-                    dep_level = "moderada"
-                elif pct is not None:
-                    dep_level = "baja"
-
-            indicators.append({
-                "side": side,
-                "player": s.get("name"),
-                "team_goals_in_sample": total_goals_team,
-                "player_goals": goals_p,
-                "pct_team_goals": pct,
-                "dependency": dep_level,
-            })
-
-    return indicators
-
-
-def compute_sample_stability(team_results: Dict) -> Dict:
-    """Check if the sample size (N matches) is reliable for indicators."""
-    stabilities = {}
-    for side in ["home", "away"]:
-        results = team_results.get(side, {})
-        form = results.get("form", {})
-        n = form.get("last_n", 0)
-        if n >= 5:
-            stabilities[side] = {"n": n, "stability": "suficiente"}
-        elif n >= 3:
-            stabilities[side] = {"n": n, "stability": "limitada"}
-        else:
-            stabilities[side] = {"n": n, "stability": "muy_limitada"}
-    return stabilities
-
-
 def detect_h2h_inconsistencies(h2h: Dict) -> List[str]:
     """Check H2H for suspicious patterns."""
     warnings = []
@@ -1748,9 +1520,10 @@ def detect_h2h_inconsistencies(h2h: Dict) -> List[str]:
         warnings.append(f"H2H contains {len(future)} future-dated matches (possible data issue)")
 
     # Check for very high-scoring matches (potential data error if avg > 5)
-    if h2h.get("summary") and h2h["summary"].get("avg_goals"):
-        if h2h["summary"]["avg_goals"] > 5:
-            warnings.append(f"H2H avg goals unusually high: {h2h['summary']['avg_goals']}")
+    total = h2h.get("total_matches", 0)
+    total_goals_sum = h2h.get("total_goals", 0)
+    if total > 0 and total_goals_sum / total > MAX_AVG_GOALS_H2H:
+        warnings.append(f"H2H avg goals unusually high: {round(total_goals_sum / total, 2)}")
 
     return warnings
 
@@ -1767,23 +1540,15 @@ def validate_data_completeness(ctx: Dict) -> Dict[str, List[str]]:
     }
 
     odds = ctx.get("odds", {})
-    team_h = ctx.get("team_home_results", {}).get("form", {})
-    team_a = ctx.get("team_away_results", {}).get("form", {})
+    team_h = ctx.get("team_home_results", {}).get("basic_stats", {})
+    team_a = ctx.get("team_away_results", {}).get("basic_stats", {})
 
-    # Check sample stability
-    for side, label, key in [("home", "Home", "team_home_results"), ("away", "Away", "team_away_results")]:
-        form = team_h if side == "home" else team_a
-        n = form.get("last_n", 0)
-        if n < 3:
-            result[key].append(f"{label} team form sample too small (N={n}) [IND]")
-
-    # Check if market is coherent with form
     prob_h = odds.get("prob_home")
     if prob_h and team_h.get("gf_avg") and team_a.get("gf_avg"):
         form_diff = team_h["gf_avg"] - team_a["gf_avg"]
-        if form_diff > 0.5 and prob_h < 40:
+        if form_diff > FORM_DIFF_THRESHOLD and prob_h < 40:
             result["odds"].append("Market undervaluing home team despite stronger recent form [IND]")
-        elif form_diff < -0.5 and prob_h > 60:
+        elif form_diff < -FORM_DIFF_THRESHOLD and prob_h > 60:
             result["odds"].append("Market overvaluing home team despite weaker recent form [IND]")
 
     return result
@@ -1862,8 +1627,6 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "h2h": {},
         "team_home_results": {},
         "team_away_results": {},
-        "match_stats": {},
-        "lineups": {},
         "standings": {},
         "overunder_standings": {},
         "form_standings": {},
@@ -1965,110 +1728,106 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
 
     all_match_ids = past_match_ids
 
-    stats_map = {}
-    if all_match_ids:
-        import time
-        time.sleep(1)  # let API settle before fetching stats
-        for mid in all_match_ids:
-            try:
-                stats_map[mid] = fetch_match_stats(mid)
-            except Exception as e:
-                print(f"[WARNING] fetch_match_stats({mid}) failed: {e}", file=sys.stderr)
-                stats_map[mid] = None
-            time.sleep(1.5)  # 1.5s between each stats call to avoid 429
-
-    # Fetch player stats for all historical matches (1:1 with stats_map)
+    stats_map: Dict[str, Any] = {}
     player_stats_map: Dict[str, Any] = {}
+
+    def _fetch_with_jitter(mid: str, fetch_func: Callable[..., Any]) -> tuple:
+        time.sleep(API_SLEEP_BETWEEN + random.uniform(0, 0.2))
+        try:
+            result = fetch_func(mid)
+        except Exception as e:
+            print(f"[WARNING] {fetch_func.__name__}({mid}) failed: {e}", file=sys.stderr)
+            result = None
+        return mid, result
+
     if all_match_ids:
-        import time
-        time.sleep(1)  # let API settle before fetching player stats
-        for mid in all_match_ids:
-            try:
-                player_stats_map[mid] = fetch_match_player_stats(mid)
-            except Exception as e:
-                print(f"[WARNING] fetch_match_player_stats({mid}) failed: {e}", file=sys.stderr)
-                player_stats_map[mid] = None
-            time.sleep(1.5)
+        time.sleep(API_SLEEP_INITIAL)
 
-    # Enrich each match with its advanced_stats
-    for match in final["team_home_results"].get("matches", []):
+        # Fetch stats in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(_fetch_with_jitter, mid, fetch_match_stats): mid for mid in all_match_ids}
+            for future in as_completed(futures):
+                mid, result = future.result()
+                stats_map[mid] = result
+
+        # Fetch player stats in parallel
+        time.sleep(API_SLEEP_INITIAL)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(_fetch_with_jitter, mid, fetch_match_player_stats): mid for mid in all_match_ids}
+            for future in as_completed(futures):
+                mid, result = future.result()
+                player_stats_map[mid] = result
+
+    def _enrich_match(
+        match: Dict, stats_map: Dict, player_stats_map: Dict,
+        home_tid: str, away_tid: str
+    ) -> None:
+        """Attach advanced_stats and player_stats to a single match record."""
         mid = match.get("match_id")
-        raw = stats_map.get(mid)
         is_home = match.get("team_is_home", True)
-        match["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
+        raw_stats = stats_map.get(mid)
+        match["advanced_stats"] = (
+            normalize_advanced_stats(raw_stats, team_is_home=is_home)
+            if raw_stats else {"warnings": ["Stats not available"]}
+        )
 
-    for match in final["team_away_results"].get("matches", []):
-        mid = match.get("match_id")
-        raw = stats_map.get(mid)
-        is_home = match.get("team_is_home", False)
-        match["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
-
-    # Attach player_stats to team_home_results matches (per-match, no aggregation)
-    for match in final["team_home_results"].get("matches", []):
-        mid = match.get("match_id")
         raw_ps = player_stats_map.get(mid)
-        is_home = match.get("team_is_home", True)
-
-        # Swap IDs to match API perspective when this historical match
-        # was played with our analysis away-team as home
-        api_home_id = away_team_id if not is_home else home_team_id
-        api_away_id = home_team_id if not is_home else away_team_id
+        api_home_id = away_tid if not is_home else home_tid
+        api_away_id = home_tid if not is_home else away_tid
 
         if raw_ps:
             match["player_stats"] = normalize_player_stats(raw_ps, api_home_id, api_away_id)
         else:
             match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
 
-    # Attach player_stats to team_away_results matches (per-match, no aggregation)
+    # Enrich all three collections with the shared helper
+    for match in final["team_home_results"].get("matches", []):
+        _enrich_match(match, stats_map, player_stats_map, home_team_id, away_team_id)
+
     for match in final["team_away_results"].get("matches", []):
-        mid = match.get("match_id")
-        raw_ps = player_stats_map.get(mid)
-        is_home = match.get("team_is_home", False)
+        _enrich_match(match, stats_map, player_stats_map, home_team_id, away_team_id)
 
-        api_home_id = away_team_id if not is_home else home_team_id
-        api_away_id = home_team_id if not is_home else away_team_id
-
-        if raw_ps:
-            match["player_stats"] = normalize_player_stats(raw_ps, api_home_id, api_away_id)
-        else:
-            match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
-
-    # Also attach advanced_stats to H2H matches
     for rec in final["h2h"].get("matches", []):
-        mid = rec.get("match_id")
-        raw = stats_map.get(mid)
-        is_home = rec.get("team_is_home", True)
-        rec["advanced_stats"] = normalize_advanced_stats(raw, team_is_home=is_home) if raw else {"warnings": ["Stats not available"]}
+        _enrich_match(rec, stats_map, player_stats_map, home_team_id, away_team_id)
 
-    # Attach player_stats to H2H matches (per-match, no aggregation)
-    for rec in final["h2h"].get("matches", []):
-        mid = rec.get("match_id")
-        raw_ps = player_stats_map.get(mid)
-        is_home = rec.get("team_is_home", True)
-
-        api_home_id = away_team_id if not is_home else home_team_id
-        api_away_id = home_team_id if not is_home else away_team_id
-
-        if raw_ps:
-            rec["player_stats"] = normalize_player_stats(raw_ps, api_home_id, api_away_id)
-        else:
-            rec["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
-
-    # Compute advanced_form for each team
-    final["team_home_results"]["form"]["advanced"] = compute_advanced_form(final["team_home_results"]["matches"])
-    final["team_away_results"]["form"]["advanced"] = compute_advanced_form(final["team_away_results"]["matches"])
-    final["h2h"]["form"]["advanced"] = compute_advanced_form(final["h2h"].get("matches", []))
-
-    # Aggregate player stats across all historical matches per team
-    final["team_home_results"]["player_stats"] = compute_team_player_aggregates(
-        final["team_home_results"].get("matches", [])
+    # Compute advanced stats for each team (basic_stats already at top level)
+    final["team_home_results"]["advanced_stats"] = compute_advanced_form(
+        final["team_home_results"]["matches"]
     )
-    final["team_away_results"]["player_stats"] = compute_team_player_aggregates(
-        final["team_away_results"].get("matches", [])
+    final["team_away_results"]["advanced_stats"] = compute_advanced_form(
+        final["team_away_results"]["matches"]
     )
-    final["h2h"]["player_stats"] = compute_team_player_aggregates(
+    final["h2h"]["advanced_stats"] = compute_advanced_form(
         final["h2h"].get("matches", [])
     )
+
+    # Aggregate player stats across all historical matches per team
+    _home_ps = compute_team_player_aggregates(final["team_home_results"].get("matches", []))
+    _away_ps = compute_team_player_aggregates(final["team_away_results"].get("matches", []))
+    _h2h_ps = compute_team_player_aggregates(final["h2h"].get("matches", []))
+
+    # Promote player_stats inner keys and remove wrapper
+    final["team_home_results"]["player_stats_as_home"] = _home_ps.get("as_historical_home", {})
+    final["team_home_results"]["player_stats_as_away"] = _home_ps.get("as_historical_away", {})
+    final["team_away_results"]["player_stats_as_home"] = _away_ps.get("as_historical_home", {})
+    final["team_away_results"]["player_stats_as_away"] = _away_ps.get("as_historical_away", {})
+    final["h2h"]["player_stats_as_home"] = _h2h_ps.get("as_historical_home", {})
+    final["h2h"]["player_stats_as_away"] = _h2h_ps.get("as_historical_away", {})
+
+    # Remove leftover wrappers (player_stats only — form was already replaced)
+    for _section in [final["team_home_results"], final["team_away_results"], final["h2h"]]:
+        _section.pop("player_stats", None)
+
+    # Strip individual match-level advanced_stats and player_stats from JSON output.
+    # Aggregates (advanced_stats, player_stats_as_*) were already computed above.
+    for _matches_list in [
+        final["team_home_results"].get("matches", []),
+        final["team_away_results"].get("matches", []),
+        final["h2h"].get("matches", []),
+    ]:
+        for _m in _matches_list:
+            _m.pop("advanced_stats", None)
+            _m.pop("player_stats", None)
 
     # Add top-level summary stats to team_home_results and team_away_results
     final["team_home_results"] = {
@@ -2080,59 +1839,31 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         **_compute_top_level_stats(final["team_away_results"].get("matches", [])),
     }
 
-    # Add top-level summary stats to h2h (goals_for/goals_against already in h2h.matches)
+    # Add top-level summary stats to h2h with team-oriented naming for clarity
+    _h2h_stats = _compute_top_level_stats(final["h2h"].get("matches", []))
     final["h2h"] = {
         **final["h2h"],
-        **_compute_top_level_stats(final["h2h"].get("matches", [])),
+        "total_matches": _h2h_stats["total_matches"],
+        "team_home_wins": _h2h_stats["wins"],
+        "team_away_wins": _h2h_stats["losses"],
+        "draws": _h2h_stats["draws"],
+        "team_home_goals_for": _h2h_stats["goals_for"],
+        "team_away_goals_for": _h2h_stats["goals_against"],
+        "total_goals": _h2h_stats["total_goals"],
+        "both_teams_scored": _h2h_stats["both_teams_scored"],
     }
 
     # -------------------------------------------------------------------------
-    # 5. ACTUAL MATCH STATS
-    # -------------------------------------------------------------------------
-    final["match"]["advanced_stats"] = {"match": [], "1st-half": [], "2nd-half": [], "warnings": ["Match stats not available for matches that have not started [N/A]"]}
-    if final["match"]["status"] != "notstarted":
-        stats_raw = fetch_match_stats(event_id)
-        if stats_raw:
-            final["match"]["advanced_stats"] = normalize_advanced_stats_flat(stats_raw)
-            
-    # -------------------------------------------------------------------------
-    # 6. PLAYER STATS — CURRENT MATCH (inside match object)
-    # -------------------------------------------------------------------------
-    ps_raw = fetch_match_player_stats(event_id)
-    if ps_raw:
-        final["match"]["player_stats"] = normalize_player_stats(ps_raw, home_team_id, away_team_id)
-    else:
-        final["match"]["player_stats"] = {"warnings": ["Player stats not available [N/A]"]}
-
-    # -------------------------------------------------------------------------
-    # 7. LINEUPS / MISSING PLAYERS
+    # 5. LINEUPS / MISSING PLAYERS
     # -------------------------------------------------------------------------
     lineup_raw = fetch_match_lineups(event_id)
     if lineup_raw:
-        final["lineups"] = normalize_lineups(lineup_raw)
+        final["match"]["lineups"] = normalize_lineups(lineup_raw)
     else:
-        final["lineups"] = {"warnings": ["Lineup data not available [N/A]"]}
+        final["match"]["lineups"] = {"warnings": ["Lineup data not available [N/A]"]}
 
     # -------------------------------------------------------------------------
-    # 8. SUMMARY
-    # -------------------------------------------------------------------------
-    final["match"]["summary"] = {"warnings": ["Match summary not available for matches that have not started [N/A]"]}
-    if final["match"]["status"] != "notstarted":
-        summary_raw = fetch_match_summary(event_id)
-        if summary_raw:
-            final["match"]["summary"] = normalize_summary(summary_raw)
-
-    # -------------------------------------------------------------------------
-    # 9. COMMENTARY (minute-by-minute live commentary — solo para partidos inprogress/finished, no para notstarted)
-    # -------------------------------------------------------------------------
-    final["match"]["commentary"] = None
-    if final["match"]["status"] != "notstarted":
-        commentary_raw = fetch_match_commentary(event_id)
-        if commentary_raw:
-            final["match"]["commentary"] = commentary_raw
-
-    # -------------------------------------------------------------------------
-    # PREVIEW (web scraping)
+    # 6. PREVIEW (web scraping)
     # -------------------------------------------------------------------------
     home_slug = {"slug": build_preview_slug(home_url), "id": home_team_id}
     away_slug = {"slug": build_preview_slug(away_url), "id": away_team_id}
@@ -2189,19 +1920,6 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         else:
             final["tournament_top_scorers"] = {"warnings": ["Tournament top scorers not available [N/A]"]}
 
-    # -------------------------------------------------------------------------
-    # 15. AGGREGATE INDICATORS
-    # -------------------------------------------------------------------------
-    final["indicators"]["offensive_dependency"] = compute_offensive_dependency(
-        final["match"]["player_stats"],
-        {"home": final["team_home_results"], "away": final["team_away_results"]},
-        final["top_scorers"],
-    )
-    final["indicators"]["sample_stability"] = compute_sample_stability({
-        "home": final["team_home_results"],
-        "away": final["team_away_results"],
-    })
-
     # H2H inconsistencies
     h2h_warnings = detect_h2h_inconsistencies(final["h2h"])
     final["h2h"]["warnings"].extend(h2h_warnings)
@@ -2230,11 +1948,15 @@ if __name__ == "__main__":
     
     ctx = build_context(event_id, home_team_id, away_team_id)
 
-    # Output JSON to stdout
-    print(json.dumps(ctx, indent=2, ensure_ascii=False))
+    # Output JSON to stdout only if connected to a TTY (not piped)
+    if sys.stdout.isatty():
+        print(json.dumps(ctx, indent=2, ensure_ascii=False))
 
-    # Save JSON to file
-    output_file = f"context_{event_id}.json"
+    # Save JSON to ../analysis/ directory
+    analysis_dir = Path(__file__).parent.parent / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    output_file = analysis_dir / f"{event_id}.json"
+    
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(ctx, f, indent=2, ensure_ascii=False)
 

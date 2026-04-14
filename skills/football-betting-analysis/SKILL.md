@@ -1,22 +1,23 @@
 ---
 name: football-betting-analysis
 description: >
-  Análisis de partidos de fútbol en 8 capas, en tres modos: pre-partido,
-  en vivo y post-partido. Recibe una consulta en lenguaje natural, descubre
-  el partido en FlashScore MCP, ejecuta build_match_context.py para obtener
-  un contexto normalizado en JSON, y produce un informe estructurado con
-  lenguaje probabilístico. No inventa datos, no suple la predicción con
-  modelos heurísticos.
+  Análisis pre-partido de fútbol en 8 capas. Recibe una consulta en lenguaje
+  natural, descubre el partido en FlashScore MCP, ejecuta build_match_context.py
+  para obtener un contexto normalizado en JSON, y produce un informe estructurado
+  con lenguaje probabilístico. Solo para partidos notstarted. No inventa datos,
+  no suple la predicción con modelos heurísticos.
 ---
 
 # Football Betting Analysis
 
 ## 1. Overview
 
-Análisis de partidos de fútbol en tres modos: pre-partido, en vivo y post-partido.
-Recibe una consulta en lenguaje natural, descubre el partido en FlashScore MCP,
-ejecuta el script de preprocesamiento `build_match_context.py` para obtener un
-contexto JSON normalizado, y produce un informe estructurado con lenguaje probabilístico.
+Análisis pre-partido de fútbol. Recibe una consulta en lenguaje natural, descubre
+el partido en FlashScore MCP, ejecuta el script de preprocesamiento
+`build_match_context.py` para obtener un contexto JSON normalizado, y produce un
+informe estructurado con lenguaje probabilístico.
+
+**Solo para partidos `notstarted`.** Para partidos `inprogress` o `finished` esta skill no aplica.
 
 El modelo no llama endpoints directamente (salvo para match discovery).
 Recibe datos ya limpios, normalizados y consolidados en `final_context`.
@@ -31,12 +32,13 @@ Nunca: "va a ganar", "es fijo", "el over entra seguro".
 
 ### Usar cuando:
 
-- El usuario pide análisis de un partido específico de fútbol.
-- El partido puede estar `notstarted`, `inprogress` o `finished`.
+- El usuario pide análisis pre-partido de un partido específico de fútbol.
+- El partido está en estado `notstarted`.
 
 ### No usar cuando:
 
-- La consulta es sobre un torneo o equipo sin partido específico → no procede. Se puede ofrecer buscar partidos recientes o próximos de ese equipo.
+- El partido ya está `inprogress` o `finished` → esta skill no aplica.
+- La consulta es sobre un torneo o equipo sin partido específico → no procede. Se puede ofrecer buscar partidos próximos de ese equipo.
 - `final_context` no pudo generarse.
 
 **Nota arquitectónica:** Esta versión no dispone de predicción basada en modelos
@@ -54,11 +56,8 @@ porcentajes.
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
 | `Get_Match_Details`             | Evento completo + odds                                                                   |
 | `Get_Match_H2H`                 | Head-to-head                                                                             |
-| `Get_Match_Stats`               | Estadísticas del partido (corners, tiros, tiros a puerta, posesión, tarjetas, xG, etc.) — también llamado en paralelo para cada partido del historial (matches[i].advanced_stats) |
-| `Get_Match_Player_Stats`        | Stats por jugador                                                                        |
+| `Get_Match_Stats`               | Llamado en paralelo para cada partido del historial (matches[i]) — solo para construir form.advanced agregado |
 | `Get_Match_Lineups`             | Alineaciones si existen + `missingPlayers` con nombre y motivo de ausencia               |
-| `Get_Match_Summary`             | Resumen con eventos clave                                                                |
-| `Get_Match_Commentary`          | Commentary minuto a minuto (solo para partidos inprogress/finished — no para notstarted) |
 | `Get_Team_Results`              | Match discovery (fallback) + historial de resultados del equipo                          |
 | `Get_Team_Fixtures`             | Match discovery (primario) — próximos partidos del equipo                                |
 | `Get_Tournament_Standings`      | Contexto de forma/posición en torneo                                                     |
@@ -118,7 +117,7 @@ De la consulta en lenguaje natural extraer:
   date_from:  ISO 8601,    // fecha inicio del rango
   date_to:    ISO 8601,    // fecha fin del rango
   league:     string|null,  // competición mencionada (o null)
-  analysis_mode: "prematch" | "live" | "postmatch"  // derivado de status del evento
+  analysis_mode: "prematch"  // único modo soportado
 }
 ```
 
@@ -135,9 +134,9 @@ De la consulta en lenguaje natural extraer:
 | Nombres parciales ("Barça", "Atleti")             | Fuzzy match contra `home_team`/`away_team` del resultado      |
 | Competición mencionada ("la league", "champions") | Filtrar por `league_id` tras buscar                           |
 
-| `status = "notstarted"` | `analysis_mode = "prematch"` |
-| `status = "inprogress"` | `analysis_mode = "live"` |
-| `status = "finished"` | `analysis_mode = "postmatch"` |
+| `status = "notstarted"` | `analysis_mode = "prematch"` → proceed |
+| `status = "inprogress"` | → No aplica. Notificar al usuario. |
+| `status = "finished"` | → No aplica. Notificar al usuario. |
 
 **Si solo un equipo matchea pero hay múltiples candidatos del rival:**
 → Clarificación obligatoria. Preguntar: "¿Buscás el [equipo] vs [candidato A] o vs [candidato B]?"
@@ -216,10 +215,9 @@ De la consulta en lenguaje natural extraer:
 **Paso 5 — Verificación y extracción:**
 
 ```
-16. Verificar estado del evento y asignar analysis_mode:
-    → status = "notstarted" → analysis_mode = "prematch" → proceed
-    → status = "inprogress" → analysis_mode = "live" → proceed
-    → status = "finished"  → analysis_mode = "postmatch" → proceed
+16. Verificar estado del evento:
+    → status = "notstarted" → proceed con análisis pre-partido
+    → status = "inprogress" o "finished" → "El partido ya comenzó o finalizó. Esta skill es solo pre-partido."
 17. Extraer IDs:
     → event_id = del evento encontrado
     → home_team_id = del equipo local
@@ -244,13 +242,13 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
 
 **Qué hace el script:**
 
-1. Ejecuta todas las llamadas a endpoints de FlashScore internally
-2. Normaliza H2H (descarta registros incoherentes o sospechosos)
-3. Resume historial de forma del equipo (GF, GC, over, BTTS, home/away split)
+1. Ejecuta todas las llamadas a endpoints de FlashScore internamente
+2. Construye H2H desde el historial de resultados de ambos equipos
+3. Resume historial de forma (GF, GC, over, BTTS, home/away split) — `form.basic`
 4. Extrae y normaliza ausencias desde `Get_Match_Lineups`
 5. Valida qué mercados de odds existen realmente y bloquea los que no existan
-6. Procesa eventos del partido (goles, tarjetas) y genera métricas agregadas
-7. Integra estadísticas avanzadas (tiros, posesión, xG, etc.)
+6. Integra estadísticas avanzadas de cada partido del historial (tiros, posesión, xG, etc.) — solo para construir `form.advanced` (los datos individuales no se emiten en el JSON final)
+7. Agrega player stats históricas por equipo (`player_stats.as_historical_home/away`)
 8. Incorpora contexto de torneo (posición, forma, over/under standings)
 9. Emite warnings de consistencia
 10. Consolida toda la información en un único JSON (`final_context`)
@@ -276,66 +274,27 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       home_extra_time, away_extra_time,
       home_penalties, away_penalties
     },
-    "summary": {
-      events: [{ type, minutes, description, team, players: [{name, type}] }],
+    "lineups": {
+      home: {
+        formation,              // formación reportada (de predictedFormation)
+        lineup_count,           // cantidad de jugadores en alineación
+        // -- Si hay alineaciones oficiales (startingLineups existe): --
+        starting_lineups: [...],       // alineación titular oficial [API]
+        missing_players: [...],        // jugadores ausentes con motivo [API]
+        substitutes: [...],            // sustitutos disponibles [API]
+        predicted_lineups: [],        // vacío
+        unsure_missing: [],           // vacío
+        // -- Si NO hay oficiales pero hay predicción (predictedLineups): --
+        starting_lineups: [],          // vacío
+        missing_players: [],           // vacío
+        substitutes: [],               // vacío
+        predicted_lineups: [...],      // alineación predicha [API]
+        unsure_missing: [...],         // ausencias no confirmadas [API]
+      },
+      away: { formation, lineup_count, starting_lineups, missing_players, substitutes, predicted_lineups, unsure_missing },
       warnings: string[] | null
     },
-    "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para partidos inprogress/finished, no para notstarted
     "preview": string | null,  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
-    "advanced_stats": {       // stats del partido actual (raw de fetch_match_stats — mismo formato que advanced_stats de historial)
-      "match": [
-        {"name": "Expected goals (xG)","home_team": <float>,"away_team": <float>},
-        {"name": "Goals","home_team": <int>,"away_team": <int>},
-        {"name": "Ball possession","home_team": "<X%>","away_team": "<X%>"},
-        {"name": "Total shots","home_team": <int>,"away_team": <int>},
-        {"name": "Shots on target","home_team": <int>,"away_team": <int>},
-        {"name": "Shots off target","home_team": <int>,"away_team": <int>},
-        {"name": "Blocked shots","home_team": <int>,"away_team": <int>},
-        {"name": "Shots inside the box","home_team": <int>,"away_team": <int>},
-        {"name": "Shots outside the box","home_team": <int>,"away_team": <int>},
-        {"name": "Big chances","home_team": <int>,"away_team": <int>},
-        {"name": "Corner kicks","home_team": <int>,"away_team": <int>},
-        {"name": "Touches in opposition box","home_team": <int>,"away_team": <int>},
-        {"name": "Accurate through passes","home_team": <int>,"away_team": <int>},
-        {"name": "Hit the woodwork","home_team": <int>,"away_team": <int>},
-        {"name": "Offsides","home_team": <int>,"away_team": <int>},
-        {"name": "Free kicks","home_team": <int>,"away_team": <int>},
-        {"name": "Throw ins","home_team": <int>,"away_team": <int>},
-        {"name": "Passes","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
-        {"name": "Long passes","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
-        {"name": "Passes in final third","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
-        {"name": "Crosses","home_team": "<pct%> (<completed>/<attempted>)","away_team": "<pct%> (<completed>/<attempted>)"},
-        {"name": "Expected assists (xA)","home_team": <float>,"away_team": <float>},
-        {"name": "xG on target (xGOT)","home_team": <float>,"away_team": <float>},
-        {"name": "Headed goals","home_team": <int>,"away_team": <int>},
-        {"name": "Fouls","home_team": <int>,"away_team": <int>},
-        {"name": "Tackles","home_team": "<pct%> (<won>/<attempted>)","away_team": "<pct%> (<won>/<attempted>)"},
-        {"name": "Duels won","home_team": <int>,"away_team": <int>},
-        {"name": "Clearances","home_team": <int>,"away_team": <int>},
-        {"name": "Interceptions","home_team": <int>,"away_team": <int>},
-        {"name": "Errors leading to shot","home_team": <int>,"away_team": <int>},
-        {"name": "Errors leading to goal","home_team": <int>,"away_team": <int>},
-        {"name": "Goalkeeper saves","home_team": <int>,"away_team": <int>},
-        {"name": "xGOT faced","home_team": <float>,"away_team": <float>},
-        {"name": "Goals prevented","home_team": <float>,"away_team": <float>},
-        {"name": "Yellow cards","home_team": <int>,"away_team": <int>},
-        {"name": "Red cards","home_team": <int>,"away_team": <int>}
-      ],
-        "1st-half": [...misma estructura...],
-        "2nd-half": [...misma estructura...],
-        warnings: string[] | null
-    },
-    "player_stats": {
-      home_players: [{
-        player_id, name, short_name, position, in_base_lineup, is_goalkeeper,
-        stats: { [stat_key]: { value, rank, pct?, completed?, attempted? } },
-        goals, assists, shots, shots_on_target, key_passes,
-        tackles_won, interceptions, ball_recoveries,
-        yellow_cards, red_cards, minutes
-      }],
-      away_players: [...same...],
-      warnings: string[] | null
-    },
     warnings: string[] | null
   },
   "odds": {
@@ -350,148 +309,167 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     prob_over_25, prob_btts_yes
   },
   "h2h": {
-    total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
+    total_matches,
+    team_home_wins,   // partidos ganados por el equipo local del análisis
+    team_away_wins,   // partidos ganados por el equipo visitante del análisis
+    draws,
+    team_home_goals_for,   // goles anotados por el equipo local del análisis en H2H
+    team_away_goals_for,   // goles anotados por el equipo visitante del análisis en H2H
+    total_goals, both_teams_scored,
     matches: [{
       match_id, timestamp,
       home_score, away_score,
       home_team, away_team,
       tournament_id, tournament_name,
-      team_is_home, opponent,
-      advanced_stats: {           // stats del partido individual (enriquecido de fetch_match_stats)
-        match: { ... },
-        1st_half: { ... },
-        2nd_half: { ... },
-        warnings: []
-      },
-      player_stats: {             // normalizado por match, re-orientado a perspectiva del análisis
-        home_players: [...],
-        away_players: [...],
-        warnings: string[] | null
-      }
+      team_is_home, opponent
     }],
-    form: {
-      advanced: {...},
-      basic: {...}
+    basic_stats: {               // stats básicos del historial H2H
+      all_matches, form_string, points,
+      gf_avg, gc_avg,
+      over_25_freq, btts_freq,
+      home_ppg, home_gf_avg, home_gc_avg,
+      away_ppg, away_gf_avg, away_gc_avg
     },
-    player_stats: {
-      as_historical_home: { minutes_total, goals_total, assists_total, shots_total, ... },
-      as_historical_away: { ...same shape... }
+    advanced_stats: {             // stats agregadas del historial (de advanced_stats de cada match)
+      overall: {
+        attack: {
+          goals_for_avg, xg_for_avg, xgot_for_avg, xa_for_avg,
+          shots_for_avg, shots_on_target_for_avg, shots_off_target_for_avg,
+          blocked_shots_for_avg, shots_inside_box_for_avg, shots_outside_box_for_avg,
+          big_chances_for_avg, touches_in_opposition_box_avg, hit_woodwork_avg
+        },
+        defense: {
+          goals_against_avg, xg_against_avg, xgot_faced_avg,
+          shots_against_avg, shots_on_target_against_avg, shots_off_target_against_avg,
+          blocked_shots_against_avg, shots_inside_box_against_avg, shots_outside_box_against_avg,
+          big_chances_against_avg, touches_in_opposition_box_against_avg,
+          goalkeeper_saves_avg, errors_leading_to_shot_avg, errors_leading_to_goal_avg, goals_prevented_avg
+        },
+        control: {
+          possession_avg, passes_accuracy_avg, passes_completed_avg, passes_attempted_avg,
+          long_pass_accuracy_avg, long_passes_completed_avg, long_passes_attempted_avg,
+          final_third_pass_accuracy_avg, final_third_passes_completed_avg, final_third_passes_attempted_avg,
+          accurate_through_passes_avg
+        },
+        set_pieces_and_territory: {
+          corners_for_avg, corners_against_avg, offsides_for_avg, offsides_against_avg,
+          free_kicks_for_avg, free_kicks_against_avg, throw_ins_for_avg, throw_ins_against_avg,
+          cross_accuracy_avg, crosses_completed_avg, crosses_attempted_avg
+        },
+        discipline: {
+          yellow_cards_avg, red_cards_avg, cards_total_avg, fouls_committed_avg
+        },
+        duels_and_defending: {
+          tackles_success_pct_avg, tackles_won_avg, tackles_attempted_avg,
+          duels_won_avg, clearances_avg, interceptions_avg
+        },
+        efficiency: {
+          shot_accuracy_pct, goal_conversion_pct, big_chance_conversion_pct,
+          xg_per_shot, shots_on_target_faced_per_goal_against, save_pct,
+          finishing_overperformance, conceding_overperformance
+        },
+        derived: {
+          xg_balance_avg, xg_ratio, shots_share, shots_on_target_share,
+          big_chances_balance_avg, corners_balance_avg, discipline_balance_avg
+        }
+      },
+      first_half: { /* mismo formato que overall */ },
+      second_half: { /* mismo formato que overall */ },
+      warnings: []
     },
+    player_stats_as_home: { minutes_total, goals_total, assists_total, shots_total, ... },
+    player_stats_as_away: { ...misma estructura... },
     warnings: string[]
   },
   "team_home_results": {
     total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
     matches: [{
       match_id, timestamp,
-      home_score, away_score,
-      home_team, away_team,
+      goals_for, goals_against, total_goals, both_teams_scored,
       tournament_id, tournament_name,
-      team_is_home, opponent,
-      advanced_stats: {             // stats del partido individual (enriquecido de fetch_match_stats)
-        match: { ... },
-        1st_half: { ... },
-        2nd_half: { ... },
-        warnings: []
-      },
-      player_stats: {               // normalizado por match, re-orientado a perspectiva del análisis
-        home_players: [...],
-        away_players: [...],
-        warnings: string[] | null
-      }
+      team_is_home, opponent
     }],
-    form: {
-      basic: {                   // stats básicos del historial
-        all_matches, form_string, points,
-        gf_avg, gc_avg,
-        over_25_freq, btts_freq,
-        home_ppg, home_gf_avg, home_gc_avg,
-        away_ppg, away_gf_avg, away_gc_avg
-      },
-      advanced: {                // stats agregadas del historial (de advanced_stats de cada match)
-        overall: {
-          attack: {
-            goals_for_avg, xg_for_avg, xgot_for_avg, xa_for_avg,
-            shots_for_avg, shots_on_target_for_avg, shots_off_target_for_avg,
-            blocked_shots_for_avg, shots_inside_box_for_avg, shots_outside_box_for_avg,
-            big_chances_for_avg, touches_in_opposition_box_avg, hit_woodwork_avg
-          },
-          defense: {
-            goals_against_avg, xg_against_avg, xgot_faced_avg,
-            shots_against_avg, shots_on_target_against_avg, shots_off_target_against_avg,
-            blocked_shots_against_avg, shots_inside_box_against_avg, shots_outside_box_against_avg,
-            big_chances_against_avg, touches_in_opposition_box_against_avg,
-            goalkeeper_saves_avg, errors_leading_to_shot_avg, errors_leading_to_goal_avg, goals_prevented_avg
-          },
-          control: {
-            possession_avg, passes_accuracy_avg, passes_completed_avg, passes_attempted_avg,
-            long_pass_accuracy_avg, long_passes_completed_avg, long_passes_attempted_avg,
-            final_third_pass_accuracy_avg, final_third_passes_completed_avg, final_third_passes_attempted_avg,
-            accurate_through_passes_avg
-          },
-          set_pieces_and_territory: {
-            corners_for_avg, corners_against_avg, offsides_for_avg, offsides_against_avg,
-            free_kicks_for_avg, free_kicks_against_avg, throw_ins_for_avg, throw_ins_against_avg,
-            cross_accuracy_avg, crosses_completed_avg, crosses_attempted_avg
-          },
-          discipline: {
-            yellow_cards_avg, red_cards_avg, cards_total_avg, fouls_committed_avg
-          },
-          duels_and_defending: {
-            tackles_success_pct_avg, tackles_won_avg, tackles_attempted_avg,
-            duels_won_avg, clearances_avg, interceptions_avg
-          },
-          efficiency: {
-            shot_accuracy_pct, goal_conversion_pct, big_chance_conversion_pct,
-            xg_per_shot, shots_on_target_faced_per_goal_against, save_pct,
-            finishing_overperformance, conceding_overperformance
-          },
-          derived: {
-            xg_balance_avg, xg_ratio, shots_share, shots_on_target_share,
-            big_chances_balance_avg, corners_balance_avg, discipline_balance_avg
-          }
+    basic_stats: {               // stats básicos del historial
+      all_matches, form_string, points,
+      gf_avg, gc_avg,
+      over_25_freq, btts_freq,
+      home_ppg, home_gf_avg, home_gc_avg,
+      away_ppg, away_gf_avg, away_gc_avg
+    },
+    advanced_stats: {            // stats agregadas del historial (de advanced_stats de cada match)
+      overall: {
+        attack: {
+          goals_for_avg, xg_for_avg, xgot_for_avg, xa_for_avg,
+          shots_for_avg, shots_on_target_for_avg, shots_off_target_for_avg,
+          blocked_shots_for_avg, shots_inside_box_for_avg, shots_outside_box_for_avg,
+          big_chances_for_avg, touches_in_opposition_box_avg, hit_woodwork_avg
         },
-        first_half: { /* mismo formato que overall */ },
-        second_half: { /* mismo formato que overall */ },
-        warnings: []
-      }
+        defense: {
+          goals_against_avg, xg_against_avg, xgot_faced_avg,
+          shots_against_avg, shots_on_target_against_avg, shots_off_target_against_avg,
+          blocked_shots_against_avg, shots_inside_box_against_avg, shots_outside_box_against_avg,
+          big_chances_against_avg, touches_in_opposition_box_against_avg,
+          goalkeeper_saves_avg, errors_leading_to_shot_avg, errors_leading_to_goal_avg, goals_prevented_avg
+        },
+        control: {
+          possession_avg, passes_accuracy_avg, passes_completed_avg, passes_attempted_avg,
+          long_pass_accuracy_avg, long_passes_completed_avg, long_passes_attempted_avg,
+          final_third_pass_accuracy_avg, final_third_passes_completed_avg, final_third_passes_attempted_avg,
+          accurate_through_passes_avg
+        },
+        set_pieces_and_territory: {
+          corners_for_avg, corners_against_avg, offsides_for_avg, offsides_against_avg,
+          free_kicks_for_avg, free_kicks_against_avg, throw_ins_for_avg, throw_ins_against_avg,
+          cross_accuracy_avg, crosses_completed_avg, crosses_attempted_avg
+        },
+        discipline: {
+          yellow_cards_avg, red_cards_avg, cards_total_avg, fouls_committed_avg
+        },
+        duels_and_defending: {
+          tackles_success_pct_avg, tackles_won_avg, tackles_attempted_avg,
+          duels_won_avg, clearances_avg, interceptions_avg
+        },
+        efficiency: {
+          shot_accuracy_pct, goal_conversion_pct, big_chance_conversion_pct,
+          xg_per_shot, shots_on_target_faced_per_goal_against, save_pct,
+          finishing_overperformance, conceding_overperformance
+        },
+        derived: {
+          xg_balance_avg, xg_ratio, shots_share, shots_on_target_share,
+          big_chances_balance_avg, corners_balance_avg, discipline_balance_avg
+        }
+      },
+      first_half: { /* mismo formato que overall */ },
+      second_half: { /* mismo formato que overall */ },
+      warnings: []
     },
-    player_stats: {
-      as_historical_home: { minutes_total, goals_total, assists_total, shots_total, ... },
-      as_historical_away: { ...same shape... }
-    },
+    player_stats_as_home: { minutes_total, goals_total, assists_total, shots_total, ... },
+    player_stats_as_away: { ...misma estructura... },
     warnings: string[] | null
   },
   "team_away_results": {
     total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
-    matches: [...same shape as team_home_results.matches...],
-    form: {
-      basic: {...},
-      advanced: {...}
+    matches: [{
+      match_id, timestamp,
+      goals_for, goals_against, total_goals, both_teams_scored,
+      tournament_id, tournament_name,
+      team_is_home, opponent
+    }],
+    basic_stats: {               // stats básicos del historial
+      all_matches, form_string, points,
+      gf_avg, gc_avg,
+      over_25_freq, btts_freq,
+      home_ppg, home_gf_avg, home_gc_avg,
+      away_ppg, away_gf_avg, away_gc_avg
     },
-    player_stats: {
-      as_historical_home: { minutes_total, goals_total, assists_total, shots_total, ... },
-      as_historical_away: { ...same shape... }
+    advanced_stats: {            // stats agregadas del historial (de advanced_stats de cada match)
+      overall: { /* mismo formato que en team_home_results */ },
+      first_half: { /* mismo formato */ },
+      second_half: { /* mismo formato */ },
+      warnings: []
     },
-    warnings: string[] | null
-  },
-"lineups": {
-    home: {
-      formation,              // formación reportada (de predictedFormation)
-      lineup_count,           // cantidad de jugadores en alineación
-      // -- Si hay alineaciones oficiales (startingLineups existe): --
-      starting_lineups: [...],       // alineación titular oficial [API]
-      missing_players: [...],        // jugadores ausentes con motivo [API]
-      substitutes: [...],            // sustitutos disponibles [API]
-      predicted_lineups: [],        // vacío
-      unsure_missing: [],           // vacío
-      // -- Si NO hay oficiales pero hay predicción (predictedLineups): --
-      starting_lineups: [],          // vacío
-      missing_players: [],           // vacío
-      substitutes: [],               // vacío
-      predicted_lineups: [...],      // alineación predicha [API]
-      unsure_missing: [...],         // ausencias no confirmadas [API]
-    },
-    away: { formation, lineup_count, starting_lineups, missing_players, substitutes, predicted_lineups, unsure_missing },
+    player_stats_as_home: { minutes_total, goals_total, assists_total, shots_total, ... },
+    player_stats_as_away: { ...misma estructura... },
     warnings: string[] | null
   },
   "standings": {
@@ -515,16 +493,7 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     home_scorers: [...],
     away_scorers: [...],
     warnings: string[] | null
-  },
-  "indicators": {
-    offensive_dependency: [{
-      side, player, team_goals_in_sample, player_goals, pct_team_goals, dependency
-    }],
-    sample_stability: {
-      home: { n, stability },
-      away: { n, stability }
-    }
-  },
+  }
 }
 ```
 
@@ -633,7 +602,7 @@ Resultado vs expectativa [ODDS]/[IND]:
 [ away ] [IND]:
   [mismo formato]
 
-H2H [IND]: [X]PJ — [home_wins]V [draws]E [away_wins]D | avg goles [avg]
+H2H [IND]: [X]PJ — [team_home_wins]V-local [draws]E [team_away_wins]V-visitante | goles local [team_home_goals_for] / visitante [team_away_goals_for]
   [score reciente 1]
   [score reciente 2]
 
@@ -773,13 +742,6 @@ Si `missing_players` contiene jugadores ausentes, reportarlos según los niveles
 - No estimar goles perdidos ni probabilidad de gol afectada.
 - La acumulación de ausencias en un mismo equipo puede mencionarse como observación contextual (reduce certidumbre sobre el techo de rendimiento del equipo), pero sin cifras inventadas.
 
-**Commentary minuto a minuto (uso regulado — solo para partidos inprogress/finished, no para notstarted):**
-
-- `Get_Match_Commentary` devuelve eventos minuto a minuto. **Para partidos notstarted viene vacío o no disponible.**
-- Commentary solo es válido si **coincide con indicadores de otras capas**.
-- No usar commentary como señal principal ni sobreinterpretar eventos aislados.
-- Si commentary describe un patrón no respaldado por stats → omitir o marcar como "dato observacional no concluyente".
-
 **Output obligatorio:**
 
 ```
@@ -854,7 +816,7 @@ Capa 4 NO puede contener:
 Solo descripción estructurada de datos comparables entre equipos.
 ```
 
-**Inputs:** stats de partido (`Get_Match_Stats`), historial de equipos (`Get_Team_Results`), odds.
+**Inputs:** historial de equipos (`team_home_results`, `team_away_results`, `h2h`), odds.
 
 **Cálculos:**
 
@@ -927,18 +889,7 @@ datos (capa 2) → medición (capa 4) → interpretación (capa 5) → priorizac
 
 **Scope:** Causas + contradicciones + sostenibilidad
 
-**Inputs:** output de capas 1, 2 y 4, `Get_Match_Commentary` (si disponible — solo para partidos inprogress/finished), `match_stats` (stats actuales del partido).
-
-**Regla sobre commentary (solo para partidos inprogress/finished, no para notstarted):**
-- Commentary solo es válido si coincide con indicadores de otras capas.
-- No usar commentary como señal principal.
-- No sobreinterpretar eventos aislados.
-- Si commentary describe un patrón no respaldado por stats → omitir o marcar como "dato observacional no concluyente".
-
-**[Para inprogress]:** Agregar evaluación de lo que está pasando en el partido vs lo esperado:
-- ¿El marcador refleja lo que muestran las stats?
-- ¿Algún equipo domina aunque no esté ganado?
-- ¿Eventos recientes cambiaron el partido?
+**Inputs:** output de capas 1, 2 y 4.
 
 **Regla de causalidad (nueva):** Las causas NO pueden ser una reformulación directa de un dato numérico. Deben explicar el mecanismo, no repetir la métrica.
 
@@ -1123,48 +1074,7 @@ Nota: "Las lecturas anteriores son las mejor soportadas por la evidencia disponi
 
 ---
 
-## 9. Sección Post-Partido — Lo Que Pasó
-
-**Obligatoria solo cuando `analysis_mode = "postmatch"`.**
-
-**Inputs:** `match.scores`, `summary.events`, `match_stats`, `commentary`, `odds`/`implied_probs`
-
-**Output obligatorio:**
-
-```
-## 9. Lo Que Pasó
-
-Resultado final [API]: [home] [H] - [A] [away]
-
-Desarrollo del partido [IND]:
-- Inicio: [quién pegó primero / si el primer tiempo marcó tendencia]
-- Punto de giro: [penal, roja, empate, cambio de dominio, etc. — solo si existe evidencia en summary.events o commentary]
-- Tramo final: [presión, control, reacción, sostén]
-
-Lectura estadística [API]/[IND]:
-- Tiros: [home] - [away]
-- Tiros a puerta: [home] - [away]
-- Posesión: [home]% - [away]%
-- Corners: [home] - [away]
-- xG: [home] - [away] (solo si existe en match_stats)
-- Disciplina: tarjetas [home] - [away]
-
-Mercado vs resultado [ODDS]/[IND]:
-- El mercado esperaba: [resumen de probabilidades pre-partido]
-- El resultado final fue: [alineado / parcialmente alineado / sorpresivo] con esas probabilidades
-
-Conclusión post-partido [IND]:
-- Qué confirmó del análisis pre-partido
-- Qué contradijo
-- Qué deja como señal hacia próximos partidos
-
-[Si datos insuficientes para lectura completa, agregar:]
-Lectura parcial del desarrollo: algunos datos no estuvieron disponibles para una lectura completa. Datos faltantes: [listar cuáles].
-```
-
----
-
-## 10. Política de Confianza
+## 9. Política de Confianza
 
 ### Confianza global
 
@@ -1350,7 +1260,7 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 | "No había player-stats así que inventé alineación"                                             | **Prohibido.** Capa 3 Carril B: usar `missingPlayers` de `Get_Match_Lineups` si existe. Si no hay nada → [N/A].                                            |
 | "Construí un modelo heurístico para reemplazar la predicción basada en modelos de aprendizaje" | **Prohibido.** Capa 7 = odds-driven. No inventar probabilidades.                                                                                           |
 | "Usé xG inventado como input"                                                                  | **Prohibido.** Si FlashScore no trae xG en `Get_Match_Stats` → no inventarlo. Usar los datos que la API provee.                                            |
-| "El partido ya empezó pero el análisis salió igual"                                            | **No prohibido.** Si status = inprogress → análisis en vivo disponible. Si finished → analysis_mode = "postmatch" → proceed con análisis post-partido.                 |
+| "El partido ya empezó pero igual quiero hacer el análisis"                                     | **No aplica.** Esta skill es solo para partidos `notstarted`. Para partidos `inprogress` o `finished`, no proceder.                                                   |
 | "No había injuries data así que inventé lesionados"                                            | **Prohibido.** Si `missingPlayers` no está disponible → no inventar ausencia ni motivo.                                                                    |
 | "Calculé cuánto baja el equipo por cada ausente"                                               | **Prohibido.** No estimar impacto numérico de ausencias. Usar solo lo que la API provee + niveles de ausencia definidos.                                   |
 | "Usé missingPlayers como señal fuerte por sí sola"                                             | **Prohibido.** Ausencias sin corroboración en otras capas = señal débil. Nunca señal fuerte.                                                               |
@@ -1360,7 +1270,6 @@ Solo Get_Team_Fixtures / Get_Team_Results para match discovery.
 | "Rellené la capa 3 con nombres de memoria"                                                     | **Prohibido.** Cada capa tiene output definido. Si no hay datos → [N/A].                                                                                   |
 | "La muestra de 2 partidos es representativa"                                                   | **Prohibido.** N<5 = "muestra limitada." Indicadores pesan menos.                                                                                          |
 | "Calculé un impact score con pesos 0.3/0.5"                                                    | **Prohibido.** Capa 3 usa datos directos y rankings, no fórmulas heurísticas.                                                                              |
-| "Commentary dijo X así que lo uso como señal principal"                                        | **Prohibido.** Commentary es minuto a minuto — solo para partidos inprogress/finished. Para notstarted no está disponible.                                 |
 | "Llamé a Get_Match_Details/H2H/Stats directamente desde el modelo"                             | **Prohibido.** Toda la recolección de datos del partido pasa por `build_match_context.py`. Solo `Get_Team_Fixtures/Get_Team_Results` para match discovery. |
 | "El script emitió un warning pero el dato me parecía correcto"                                 | **Prohibido.** Los warnings del script son instrucciones. Si el script marca un dato como sospechoso → respetarlo y no contradecirlo.                      |
 | "El JSON tenía [N/A] pero yo sabía el dato de memoria"                                         | **Prohibido.** El JSON ya normalizó y marcó los datos disponibles. No re-inventar datos marcados como [N/A].                                               |
