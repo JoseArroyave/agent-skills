@@ -1,8 +1,8 @@
 # Football Betting Analysis
 
-Football match analysis in 8 layers, covering pre-match, live, and post-match modes. Receives a natural language query, discovers the match via FlashScore MCP, executes `build_match_context.py` to get a normalized JSON context, and produces a structured report with probabilistic language.
+Football match analysis in 8 layers, covering **pre-match**, **live**, and **post-match** modes. Receives a natural language query, discovers the match via FlashScore MCP, executes `build_match_context.py` to get a normalized JSON context, and produces a structured report with probabilistic language.
 
-**Architecture shift:** The model no longer calls FlashScore endpoints directly for match data. It uses MCP only for match discovery, and delegates all data gathering to `build_match_context.py`, which returns a single normalized `final_context` JSON.
+**Architecture:** The model no longer calls FlashScore endpoints directly for match data. It uses MCP only for match discovery, and delegates all data gathering to `build_match_context.py`, which returns a single normalized `final_context` JSON.
 
 ## System Requirements
 
@@ -81,12 +81,12 @@ The script can generate any subset of teams by modifying the input CSV in the `_
 User (natural language query)
     │
     ▼
-Agent parses query
+Agent parses query → { home_team, away_team, date_from, date_to, league?, analysis_mode }
     │
     ▼
 Phase 1: Match Discovery (MCP direct)
     livesport search API → teams.csv lookup → Get_Team_Fixtures → Get_Team_Results (fallback)
-    → event_id, home_team_id, away_team_id
+    → event_id, home_team_id, away_team_id, analysis_mode (prematch | live | postmatch)
     │
     ▼
 Phase 2: Preprocessing (build_match_context.py)
@@ -109,25 +109,25 @@ Phase 2: Preprocessing (build_match_context.py)
     │
     ▼
 8-Layer Analysis Pipeline (model only reads final_context)
-    ├── Layer 1 — Base Context (market odds, implied probabilities)
-    ├── Layer 2 — Team Descriptive (form, H2H, averages)
-    ├── Layer 3 — Protagonists (player stats, missing players)
-    ├── Layer 4 — Composite Indicators (gaps, risks)
-    ├── Layer 5 — Diagnostic (trends, contradictions)
-    ├── Layer 6 — Signal Weighting (strong/moderate/weak)
-    ├── Layer 7 — Predictive (odds-driven probabilities)
-    └── Layer 8 — Prescriptive (best-supported markets)
+    ├── Capa 1 — Base Context (market odds, implied probabilities)
+    ├── Capa 2 — Team Descriptive (form, H2H, averages)
+    ├── Capa 3 — Protagonists (player stats, missing players)
+    ├── Capa 4 — Composite Indicators (gaps, risks)
+    ├── Capa 5 — Diagnostic (trends, contradictions)
+    ├── Capa 6 — Signal Weighting (strong/moderate/weak)
+    ├── Capa 7 — Predictive (odds-driven probabilities)
+    └── Capa 8 — Final Read (best-supported scenarios)
     │
     ▼
 Structured Report + Confidence Level
 ```
 
-**Key constraint:** After Phase 1, no more MCP calls for match data. The model receives a single JSON and only redacta (writes the analysis) from it.
+**Key constraint:** After Phase 1, no more MCP calls for match data. The model receives a single JSON and only reads from it.
 
 ## Core Behavior
 
-- The skill only analyzes **pre-match** events (`status = notstarted`).
-- If a match is `inprogress` or `finished`, the skill declines with a user message.
+- The skill analyzes **pre-match** (`status = notstarted`) and **live** (`status = inprogress`) events.
+- **Post-match** (`analysis_mode = postmatch`) analysis is also supported — output formats adapt accordingly.
 - **No external data sources** — only FlashScore via `build_match_context.py`.
 - No invented data. Missing data is marked `[N/A]` with a brief explanation.
 - Probabilities **only from odds** — indicators modulate confidence, never generate percentages.
@@ -139,14 +139,14 @@ Use this skill when:
 
 - The user requests analysis of a specific football match
 - The query includes teams, date, and optionally the competition
-- The match can be `notstarted`, `inprogress`, or `finished`
+- The match status is `notstarted`, `inprogress`, or `finished` (with `analysis_mode = postmatch`)
 
 ## When NOT To Use
 
 Do not use this skill when:
 
 - The query is about a tournament or team without a specific match → not applicable. Offer to search for recent or upcoming matches of that team.
-- The `final_context` could not be generated.
+- `final_context` could not be generated.
 
 ## Installation
 
@@ -158,10 +158,10 @@ npx skills add JoseArroyave/agent-skills --skill football-betting-analysis
 
 ## Usage (Agent Invocation)
 
-The skill is invoked automatically when the user requests pre-match football analysis. The agent:
+The skill is invoked automatically when the user requests football analysis. The agent:
 
 1. Parses the natural language query into structured fields
-2. **Phase 1:** Searches teams via `livesport search API`, falls back to `teams.csv`, then discovers the match via FlashScore MCP (`Get_Team_Fixtures` → `Get_Team_Results` fallback) → extracts `event_id`, `home_team_id`, `away_team_id`
+2. **Phase 1:** Searches teams via `livesport search API`, falls back to `teams.csv`, then discovers the match via FlashScore MCP (`Get_Team_Fixtures` → `Get_Team_Results` fallback) → extracts `event_id`, `home_team_id`, `away_team_id`, `analysis_mode`
 3. **Phase 2:** Executes `build_match_context.py` with those three IDs → receives `final_context` JSON
 4. Runs the 8-layer analysis pipeline using only the data in `final_context`
 5. Produces a structured report with confidence level
@@ -177,13 +177,14 @@ The skill is invoked automatically when the user requests pre-match football ana
 
 ### Query Parsing
 
-| Field       | Description                                 |
-| ----------- | ------------------------------------------- |
-| `home_team` | First team mentioned                        |
-| `away_team` | Second team mentioned (or null if only one) |
-| `date_from` | Start of date range (ISO 8601)              |
-| `date_to`   | End of date range (ISO 8601)                |
-| `league`    | Competition mentioned (or null)             |
+| Field          | Description                                  |
+| -------------- | -------------------------------------------- |
+| `home_team`    | First team mentioned                         |
+| `away_team`    | Second team mentioned (or null if only one)  |
+| `date_from`    | Start of date range (ISO 8601)               |
+| `date_to`      | End of date range (ISO 8601)                 |
+| `league`       | Competition mentioned (or null)              |
+| `analysis_mode`| `prematch` (default), `live`, `postmatch`    |
 
 **Date shortcuts:**
 
@@ -192,12 +193,19 @@ The skill is invoked automatically when the user requests pre-match football ana
 - "este finde" / "this weekend" → date_from = friday, date_to = sunday
 - "esta semana" / "this week" → date_from = monday, date_to = sunday
 
+**Status handling:**
+
+| `status = "notstarted"` | `analysis_mode = "prematch"` → proceed                        |
+| `status = "inprogress"` | → Proceed with live analysis                                  |
+| `status = "finished"`   | → `analysis_mode = "postmatch"` — proceed with post-match read |
+
 ## Data Flow — MCP vs Script
 
 | What            | How                                                               |
 | --------------- | ----------------------------------------------------------------- |
 | Match discovery | `livesport search API` → `teams.csv` (fallback) → `Get_Team_Fixtures` → `Get_Team_Results` via MCP |
-| All other data  | `build_match_context.py` (internal API calls)                        |
+| H2H data        | Built from `fetch_team_results()` of both teams — not a direct `Get_Match_H2H` call |
+| All other data  | `build_match_context.py` (internal API calls)                     |
 
 **The model must not call any MCP endpoint after receiving `final_context`.**
 
@@ -206,20 +214,19 @@ The skill is invoked automatically when the user requests pre-match football ana
 These are called **internally by the script**, not by the model:
 
 ```
-fetch_match_details()       → /matches/details
-fetch_match_odds()         → /matches/odds
-fetch_team_results()       → /teams/results (home + away)
-fetch_team_search()        → /search (livesport search API)
-fetch_match_stats()         → /matches/match/stats
-fetch_match_player_stats() → /matches/match/player-stats
-fetch_match_lineups()       → /matches/match/lineups
-fetch_match_summary()      → /matches/match/summary
-fetch_match_commentary()   → /matches/match/commentary
-fetch_tournament_standings()   → /tournaments/standings
-fetch_match_standings_form()    → /matches/standings/form
-fetch_match_standings_overunder() → /matches/standings/over-under
-fetch_match_top_scorers()  → /matches/standings/top-scorers
-fetch_tournament_top_scorers() → /tournaments/standings/top-scorers
+fetch_match_details()             → /matches/details
+fetch_match_odds()               → /matches/odds
+fetch_team_results()              → /teams/results (home + away)
+fetch_match_stats()              → /matches/match/stats (per match in history — for advanced form)
+fetch_match_player_stats()       → /matches/match/player-stats
+fetch_match_lineups()             → /matches/match/lineups
+fetch_match_summary()             → /matches/match/summary
+fetch_match_commentary()          → /matches/match/commentary
+fetch_tournament_standings()      → /tournaments/standings
+fetch_match_standings_form()     → /matches/standings/form
+fetch_match_standings_overunder()→ /matches/standings/over-under
+fetch_match_top_scorers()         → /matches/standings/top-scorers
+fetch_tournament_top_scorers()    → /tournaments/standings/top-scorers
 ```
 
 ## `final_context` Output Schema
@@ -229,15 +236,51 @@ The script returns a single JSON with this structure:
 ```json
 {
   "meta": { "event_id", "home_team_id", "away_team_id", "generated_at" },
+
   "match": {
-    "event_id", "status",
+    "event_id",
     "home_team": { "id", "name", "event_participant_id" },
     "away_team": { "id", "name", "event_participant_id" },
     "tournament": { "id", "stage_id", "name" },
-    "country", "referee", "timestamp", "datetime",
-    "scores": { "home", "away", "home_total", "away_total", ... },
+    "country", "referee", "timestamp", "datetime", "status",
+    "scores": {
+      "home", "away", "home_total", "away_total",
+      "home_1st_half", "away_1st_half",
+      "home_2nd_half", "away_2nd_half",
+      "home_extra_time", "away_extra_time",
+      "home_penalties", "away_penalties"
+    },
+    "lineups": {
+      "home": {
+        "formation", "lineup_count",
+        "starting_lineups": [...],   // if confirmed lineups available
+        "missing_players": [...],    // with name, player_id, reason, country
+        "substitutes": [...],
+        "predicted_lineups": [...],  // if confirmed not available
+        "unsure_missing": [...]
+      },
+      "away": { /* same structure */ },
+      "warnings": null
+    },
+    "preview": "string | null",     // FlashScore web scraping — if unavailable: null
+    "summary": { "events": [...], "goals_home", "goals_away", "warnings": null },
+    "commentary": [...],             // minute-by-minute — inprogress/finished only
+    "match_stats": { ... },          // possession, shots, xG, etc. — inprogress/finished only
+    "player_stats": { ... },         // current match player stats — inprogress/finished only
+    "live_analysis": {               // ONLY for status = "inprogress"
+      "total_goals_over_25": { "probability", "signal", "confidence" },
+      "total_goals_under_25": { ... },
+      "btts_yes": { ... }, "btts_no": { ... },
+      "next_goal_home": { ... }, "next_goal_away": { ... }, "next_goal_no_more": { ... },
+      "next_corner": { "lean", "signal", "confidence", "mode": "signal_only" },
+      "total_cards": { "lean", "signal", "confidence", "mode": "signal_only" },
+      "1x2_final": { "probabilities": { "home", "draw", "away" }, "model_version", "calibrated", "inputs_quality", "top_factors", "prematch_source", "confidence", "warnings" },
+      "match_minute": int, "current_score": { "home": int, "away": int },
+      "warnings": []
+    },
     "warnings": null
   },
+
   "odds": {
     "available_markets": [],
     "odds_home", "odds_draw", "odds_away",
@@ -245,79 +288,99 @@ The script returns a single JSON with this structure:
     "odds_btts_yes", "odds_btts_no",
     "warnings": []
   },
-  "implied_probs": { "prob_home", "prob_draw", "prob_away", "prob_over_25", "prob_btts_yes" },
+
+  "implied_probs": {
+    "prob_home", "prob_draw", "prob_away",
+    "prob_over_25", "prob_btts_yes"
+  },
+
   "h2h": {
-    "records": [{ "match_id", "timestamp", "home_score", "away_score", "home_team", "away_team", "tournament_id", "tournament_name" }],
-    "summary": { "total_matches", "home_wins", "draws", "away_wins", "avg_goals" },
+    "total_matches", "home_team_wins", "away_team_wins", "draws",
+    "home_team_goals_for", "away_team_goals_for",
+    "total_goals", "both_teams_scored",
+    "matches": [{
+      "match_id", "timestamp", "home_score", "away_score",
+      "home_team", "away_team", "tournament_id", "tournament_name",
+      "team_is_home", "opponent"
+    }],
+    "basic_stats": {
+      "home_team": { "wins", "losses", "draws", "gf_avg", "gc_avg", "total_goals" },
+      "away_team": { "wins", "losses", "draws", "gf_avg", "gc_avg", "total_goals" },
+      "both_teams_scored", "over_25_freq", "btts_freq", "total_matches", "total_goals"
+    },
+    "advanced_stats": {
+      "home_team": {
+        "overall":  { "attack": {...}, "defense": {...}, "control": {...}, "set_pieces_and_territory": {...}, "discipline": {...}, "duels_and_defending": {...}, "efficiency": {...}, "derived": {...} },
+        "first_half":  { /* same structure */ },
+        "second_half": { /* same structure */ }
+      },
+      "away_team": { /* same structure */ }
+    },
+    "home_team_player_stats": {
+      "general": { "minutes_total", "goals_total", "assists_total", "shots_total", "shots_on_target_total", "key_passes_total", "tackles_won_total", "interceptions_total", "ball_recoveries_total", "yellow_cards_total", "red_cards_total", "goals_per_90", "assists_per_90", "shots_per_90", "position_distribution", "in_base_lineup_count", "substitute_count" },
+      "individual": { "[player_name]": { "position", "offense": {...}, "creation": {...}, "possession": {...}, "defense": {...}, "efficiency": {...}, "discipline": {...}, "goalkeeping": {...}, "derived": {...} } }
+    },
+    "away_team_player_stats": { /* same structure */ },
     "warnings": []
   },
-  "team_home_results": {
-    "matches": [{ ... }],
-    "form": { "last_n", "form_string", "points", "gf_avg", "gc_avg", "over_25_freq", "btts_freq", "home_ppg", "away_ppg", ... },
+
+  "home_team_results": {
+    "matches": [{ "match_id", "timestamp", "goals_for", "goals_against", "total_goals", "both_teams_scored", "tournament_id", "tournament_name", "team_is_home", "opponent" }],
+    "basic_stats": {
+      "all_matches", "form_string", "points",
+      "home_gf_avg", "home_gc_avg", "over_25_freq", "btts_freq",
+      "home_ppg", "away_ppg", "total_matches", "wins", "draws", "losses",
+      "goals_for", "goals_against", "total_goals", "both_teams_scored"
+    },
+    "advanced_stats": {
+      "overall":  { "attack": {...}, "defense": {...}, "control": {...}, "set_pieces_and_territory": {...}, "discipline": {...}, "duels_and_defending": {...}, "efficiency": {...}, "derived": {...} },
+      "first_half":  { /* same structure */ },
+      "second_half": { /* same structure */ },
+      "warnings": []
+    },
+    "player_stats_as_home": {
+      "general": { ... },
+      "individual": { "[player_name]": { "position", "offense": {...}, "creation": {...}, "possession": {...}, "defense": {...}, "efficiency": {...}, "discipline": {...}, "goalkeeping": {...}, "derived": {...} } }
+    },
+    "player_stats_as_away": { /* same structure */ },
     "warnings": null
   },
-  "team_away_results": { "matches": [...], "form": {...}, "warnings": null },
-  "match_stats": {
-    "stats": [{ "name", "home_team", "away_team", "home_pct", "away_pct" }],
-    "possession": { "home", "away" },
-    "total_shots": { "home", "away" },
-    "shots_on_target": { "home", "away" },
-    "corners": { "home", "away" },
-    "yellow_cards": { "home", "away" },
-    "red_cards": { "home", "away" },
-    "xg": { "home", "away" },
-    "xgotal": { "home", "away" },
-    "passes": { "home": { "accuracy_pct", "completed" }, "away": {...} },
+
+  "away_team_results": {
+    "matches": [...],
+    "basic_stats": { /* same structure as home_team_results */ },
+    "advanced_stats": { /* same structure */ },
+    "player_stats_as_home": { ... },
+    "player_stats_as_away": { ... },
     "warnings": null
   },
-  "player_stats": {
-    "home_players": [{ "player_id", "name", "short_name", "position", "in_base_lineup", "goals", "assists", "shots", "shots_on_target", "key_passes", ... }],
-    "away_players": [...],
-    "top_scorers_home", "top_scorers_away": [...],
-    "top_assists_home", "top_assists_away": [...],
-    "top_shots_home", "top_shots_away": [...],
-    "top_key_passes_home", "top_key_passes_away": [...],
-    "warnings": null
-  },
-  "lineups": {
-    "home": { "formation", "lineup_count", "missing_players": [{ "name", "player_id", "reason", "country" }], "unsure_missing": [...] },
-    "away": { "formation", "lineup_count", "missing_players": [...], "unsure_missing": [...] },
-    "warnings": null
-  },
-  "summary": {
-    "events": [{ "minutes", "team", "type", "description" }],
-    // type: goal | own_goal | penalty_goal | penalty_missed | substitution | var | yellow_card | red_card | second_yellow
-    "goals_home", "goals_away",
-    "warnings": null
-  },
-  "commentary": [{ minutes, description }] | null,  // minuto a minuto — solo para inprogress/finished
-  "preview": string | { warnings: ["Match preview not available [N/A]"] },  // texto de previa — web scraping FlashScore (DOM o contentParsed embebido)
+
   "standings": {
-    "teams": { [team_id]: { "position", "name", "points", "wins", "draws", "losses", "goals", "goal_difference" } },
+    "teams": { "[team_id]": { "position", "name", "points", "wins", "draws", "losses", "goals", "goal_difference" } },
     "warnings": null
   },
+
   "overunder_standings": {
-    "teams": { [team_id]: { "over", "under", "average_goals" } },
+    "teams": { "[team_id]": { "over", "under", "average_goals" } },
     "warnings": null
   },
+
   "form_standings": {
-    "teams": { [team_id]: { "points", "form_string" } },
+    "teams": { "[team_id]": { "points", "form_string" } },
     "warnings": null
   },
+
   "top_scorers": {
     "home_scorers": [{ "name", "player_id", "team", "goals", "assists" }],
     "away_scorers": [...],
     "warnings": null
   },
+
   "tournament_top_scorers": {
     "home_scorers": [...],
     "away_scorers": [...],
     "warnings": null
-  },
-  "indicators": {
-    "offensive_dependency": [{ "side", "player", "team_goals_in_sample", "player_goals", "pct_team_goals", "dependency" }],
-    "sample_stability": { "home": { "n", "stability" }, "away": { "n", "stability" } }
-  },
+  }
 }
 ```
 
@@ -325,46 +388,72 @@ The script returns a single JSON with this structure:
 
 Every data point in the analysis is tagged with its source:
 
-| Tag      | Meaning                                                             |
-| -------- | ------------------------------------------------------------------- |
-| `[API]`  | Direct from a FlashScore endpoint (via `build_match_context.py`)    |
-| `[ODDS]` | Calculated from market odds in `final_context`                      |
-| `[IND]`  | Indicator derived from API data (not from odds)                     |
+| Tag      | Meaning                                                              |
+| -------- | -------------------------------------------------------------------- |
+| `[API]`  | Direct from a FlashScore endpoint (via `build_match_context.py`)     |
+| `[ODDS]` | Calculated from market odds in `final_context`                       |
+| `[IND]`  | Indicator derived from API data (not from odds)                      |
 | `[N/A]`  | Not available — marked by the script or absent from `final_context` |
 
-## The 8 Layers
+## The 8 Layers (Capas)
 
-### Layer 1 — Base Context
+### Capa 1 — Base Context
 
 Market odds → implied probabilities. Indicators vs market alignment. No invented percentages.
 
-### Layer 2 — Team Descriptive
+**Status-aware output:**
+- `notstarted` → "Contexto del Partido"
+- `inprogress` → live market odds + current score
+- `postmatch` → "Mercado esperaba [ODDS]" + result vs expectation
 
-Recent form (W/D/L), points, goals scored/conceded, Over 2.5/BTTS frequency. Home/away split. H2H history (built from team results, not a separate call). Preview text from FlashScore web scraping (`final["preview"]`).
+### Capa 2 — Team Descriptive
 
-### Layer 3 — Protagonists
+Recent form (W/D/L), points, goals scored/conceded, Over 2.5/BTTS frequency. Home/away split. H2H history (built from team results, not a separate call). Preview text from FlashScore web scraping.
+
+**Status-aware output:**
+- `notstarted` → "Qué Viene Pasando"
+- `inprogress` → "Lo Que Está Pasando" + current score + minute
+- `finished` → "Lo Que Pasó" + final result
+
+### Capa 3 — Protagonists
 
 Two lanes: **(A)** player stats from `player_stats` in JSON (goals, assists, shots, key_passes); **(B)** `missingPlayers` from `lineups` in JSON. No composite formulas. Rankings by individual metric only.
 
-### Layer 4 — Composite Indicators
+**Rule:** Capa 3 = only facts + minimal context. No interpretation, no conclusions, no causal language.
+
+### Capa 4 — Composite Indicators
 
 Offensive advantage, defensive fragility, form gap, home/away gap, Over/BTTS risk, volatility, discipline index, market-data coherence.
 
-### Layer 5 — Diagnostic
+**Rule:** Capa 4 measures ("how much?"). Capa 5 explains ("why does it matter?"). No causal language in Capa 4.
+
+### Capa 5 — Diagnostic
 
 Are results backed by stats? Is defense conceding by merit or weak opponents? Is Over 2.5 from volume or defensive chaos? Commentary corroborated by other layers.
 
-### Layer 6 — Signal Weighting
+**Rule:** Explain mechanisms, not metrics. E.g., "Madrid dominates at home due to the intensity in transitions and high press" — not "because it has 2.25 ppg."
 
-Classifies all signals as **strong** (consistency N≥5, market-data alignment), **moderate** (N=3-4, H2H), or **weak** (N<3, contradictions).
+### Capa 6 — Signal Weighting
 
-### Layer 7 — Predictive
+Classifies all signals as **strong** (consistency N≥5, market-data alignment), **moderate** (N=3-4, H2H), or **weak** (N<3, contradictions). Capa 6 is the only prioritization layer — not repeated in Capa 8.
+
+### Capa 7 — Predictive
 
 Probabilities **only from odds**. Implied probabilities for 1X2, Over 2.5, BTTS. Confidence modulated by indicator alignment. **No invented percentages.**
 
-### Layer 8 — Prescriptive
+**Status-aware output:**
+- `notstarted` → "Qué Podría Pasar"
+- `inprogress` → "Qué Se Espera" using `live_analysis` probabilities + current score/xG
+- `postmatch` → "Qué Se Esperaba" (odds pre-match vs actual result)
 
-Top 3-5 strongest signals. 2-3 alerts. Markets with multi-layer support. Markets without support (briefly explained).
+### Capa 8 — Final Read
+
+Conceptual: which scenario makes most sense, what hidden risk exists, what NOT to back. **NO** repeating numbers from Capa 7 or signals from Capa 6.
+
+**Status-aware output:**
+- `notstarted` → forward-looking scenarios
+- `inprogress` → "Lectura en Vivo" — current dynamics vs pre-match expectations
+- `postmatch` → "Lectura del Desarrollo" — result vs expectations, partial read if data insufficient
 
 ## Confidence Levels
 
@@ -381,32 +470,32 @@ Top 3-5 strongest signals. 2-3 alerts. Markets with multi-layer support. Markets
 ```
 # [Home] vs [Away] — [Competition] ([Date])
 
-## 1. Context
+## 1. Contexto del Partido
 [...]
 
-## 2. What's Been Happening
+## 2. Qué Viene Pasando / Lo Que Está Pasando / Lo Que Pasó
 [...]
 
-## 3. Protagonists
+## 3. Protagonistas
 [...]
 
-## 4. Composite Indicators
+## 4. Indicadores Compuestos
 [...]
 
-## 5. Why It's Happening
+## 5. Por Qué Pasa / Qué Está Pasando
 [...]
 
-## 6. Which Signals Weigh More
+## 6. Qué Señales Pesan Más
 [...]
 
-## 7. What Could Happen
+## 7. Qué Podría Pasar / Qué Se Espera
 [...]
 
-## 8. What to Read With Best Support
+## 8. Lectura Final
 [...]
 
 ---
-Confidence: [very low / low / medium / medium-high / high]
+Confianza global: [muy baja / baja / media / media-alta / alta]
 ```
 
 ## Anti-Rationalization Rules
@@ -417,27 +506,34 @@ These rules are **mandatory**. Never:
 - Use Bzzoiro, SofaScore, Transfermarkt, or any source other than FlashScore
 - Build a heuristic model to replace the odds-driven architecture
 - Say "will win", "it's certain", "over 2.5 is guaranteed"
-- Assign percentage probabilities to indicators (Layer 7 probabilities come from odds only)
+- Assign percentage probabilities to indicators (Capa 7 probabilities come from odds only)
 - Use commentary as a primary signal (only valid if corroborated by other layers)
-- Analyze a match that has already started or finished
-- Calculate composite scores with weights (0.3, 0.5, etc.) in Layer 3 — use direct data + rankings
+- Calculate composite scores with weights (0.3, 0.5, etc.) in Capa 3 — use direct data + rankings
 - Call MCP endpoints directly after receiving `final_context` — all data must come from the JSON
 - Re-interpret or recalculate data already normalized in `final_context`
 - Use `Get_Match_H2H`, `Get_Match_Details`, etc. directly — those are called inside `build_match_context.py`
+- Treat `missingPlayers` as a strong signal on its own — signal weight requires corroboration from other layers
+- Claim "high confidence" with event-only data — umbals table is mandatory
 
 ## What Does NOT Exist in FlashScore
 
-| Non-existent data           | Consequence                                                     |
-| -------------------------- | --------------------------------------------------------------- |
-| Confirmed pre-match lineups | `Get_Match_Lineups` exists but may be empty pre-match. Do not invent. |
-| Historical injury data      | Not available. Do not invent.                                   |
+| Non-existent data               | Consequence                                                                                              |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| Confirmed pre-match lineups    | `Get_Match_Lineups` exists but may be empty pre-match. Use `predictedLineups` if available. Do not invent. |
+| Historical injury data         | Not available. Do not invent.                                                                            |
+| `missingPlayers` without data  | If the endpoint doesn't return it → do not invent the player or reason.                                 |
+
+**Lineup priority in `normalize_lineups`:**
+1. If `startingLineups` exists → use `starting_lineups`, `missing_players`, `substitutes`
+2. If only `predictedLineups` exists → use `predicted_lineups`, `unsure_missing`
+3. `missingPlayers` (name + reason) may be available even without confirmed lineups — use when present
 
 ## Pipeline Rules (Summary)
 
 ```
 Phase 1 (MCP direct):
   livesport search API → teams.csv (fallback) → Get_Team_Fixtures → Get_Team_Results (fallback)
-  → Extract: event_id, home_team_id, away_team_id
+  → Extract: event_id, home_team_id, away_team_id, analysis_mode (prematch | live | postmatch)
 
 Phase 2 (build_match_context.py):
   python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
@@ -446,3 +542,13 @@ Phase 2 (build_match_context.py):
 NO MCP CALLS AFTER PHASE 1.
 NO ENDPOINTS CALLED DIRECTLY BY THE MODEL.
 ```
+
+## Non-Redundancy Rules
+
+| Capa | Core question | What NOT to do                                    |
+|------|-------------- | ------------------------------------------------- |
+| 3    | What is there? | No interpretation, no conclusions                 |
+| 4    | How much?      | No "why it matters"                               |
+| 5    | Why?           | No metric reformulation — explain the mechanism   |
+| 6    | Which weigh?   | No repeating Capa 5 diagnosis                     |
+| 8    | What do I stick with? | No repeating Capa 6 signals, no Capa 7 numbers |
