@@ -17,7 +17,7 @@ el partido en FlashScore MCP, ejecuta el script de preprocesamiento
 `build_match_context.py` para obtener un contexto JSON normalizado, y produce un
 informe estructurado con lenguaje probabilístico.
 
-**Solo para partidos `notstarted`.** Para partidos `inprogress` o `finished` esta skill no aplica.
+**Solo para partidos `notstarted` e `inprogress`.** Para partidos `finished` esta skill no aplica.
 
 El modelo no llama endpoints directamente (salvo para match discovery).
 Recibe datos ya limpios, normalizados y consolidados en `final_context`.
@@ -37,7 +37,7 @@ Nunca: "va a ganar", "es fijo", "el over entra seguro".
 
 ### No usar cuando:
 
-- El partido ya está `inprogress` o `finished` → esta skill no aplica.
+- El partido ya está `finished` → esta skill no aplica.
 - La consulta es sobre un torneo o equipo sin partido específico → no procede. Se puede ofrecer buscar partidos próximos de ese equipo.
 - `final_context` no pudo generarse.
 
@@ -135,7 +135,7 @@ De la consulta en lenguaje natural extraer:
 | Competición mencionada ("la league", "champions") | Filtrar por `league_id` tras buscar                           |
 
 | `status = "notstarted"` | `analysis_mode = "prematch"` → proceed |
-| `status = "inprogress"` | → No aplica. Notificar al usuario. |
+| `status = "inprogress"` | → Proceed con análisis en vivo. |
 | `status = "finished"` | → No aplica. Notificar al usuario. |
 
 **Si solo un equipo matchea pero hay múltiples candidatos del rival:**
@@ -217,7 +217,8 @@ De la consulta en lenguaje natural extraer:
 ```
 16. Verificar estado del evento:
     → status = "notstarted" → proceed con análisis pre-partido
-    → status = "inprogress" o "finished" → "El partido ya comenzó o finalizó. Esta skill es solo pre-partido."
+    → status = "inprogress" → proceed con análisis en vivo
+    → status = "finished" → "El partido ya finalizó. Esta skill es solo pre-partido y en vivo."
 17. Extraer IDs:
     → event_id = del evento encontrado
     → home_team_id = del equipo local
@@ -295,6 +296,26 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       warnings: string[] | null
     },
     "preview": string | null,  // texto de previa del partido — web scraping de FlashScore (DOM o contentParsed embebido)
+    // --- inprogress or finished only ---
+    "summary": object | null,    // eventos clave del partido (goles, tarjetas, etc.) [API]
+    "commentary": object | null, // narración minuto a minuto [API]
+    "match_stats": object | null, // estadísticas del partido (posesión, tiros, xG, etc.) [API]
+    "player_stats": object | null, // stats de jugadores del partido actual [API]
+    "live_analysis": {           // solo para status = "inprogress"
+      total_goals_over_25: { probability, signal, confidence },
+      total_goals_under_25: { ... },
+      btts_yes: { ... },
+      btts_no: { ... },
+      next_goal_home: { ... },
+      next_goal_away: { ... },
+      next_goal_no_more: { ... },  // explicit class — no more goals in the match
+      next_corner: { lean, signal, confidence, mode: "signal_only" },
+      total_cards: { lean, signal, confidence, mode: "signal_only" },
+      1x2_final: { probabilities: { home, draw, away }, model_version, calibrated, inputs_quality, top_factors, prematch_source, confidence, warnings },
+      match_minute: int,
+      current_score: { home: int, away: int },
+      warnings: []
+    } | null,
     warnings: string[] | null
   },
   "odds": {
@@ -310,11 +331,11 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
   },
   "h2h": {
     total_matches,
-    team_home_wins,   // partidos ganados por el equipo local del análisis
-    team_away_wins,   // partidos ganados por el equipo visitante del análisis
+    home_team_wins,   // partidos ganados por el equipo local del análisis
+    away_team_wins,   // partidos ganados por el equipo visitante del análisis
     draws,
-    team_home_goals_for,   // goles anotados por el equipo local del análisis en H2H
-    team_away_goals_for,   // goles anotados por el equipo visitante del análisis en H2H
+    home_team_goals_for,   // goles anotados por el equipo local del análisis en H2H
+    away_team_goals_for,   // goles anotados por el equipo visitante del análisis en H2H
     total_goals, both_teams_scored,
     matches: [{
       match_id, timestamp,
@@ -324,65 +345,57 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       team_is_home, opponent
     }],
     basic_stats: {               // stats básicos del historial H2H
-      all_matches, form_string, points,
-      gf_avg, gc_avg,
+      // home_team = stats of the team that IS home in the CURRENT match (Bayern)
+      // away_team = stats of the team that IS away in the CURRENT match (Real Madrid)
+      // form_string/points/home_ppg/away_ppg excluded — not meaningful in h2h context
+      home_team: {
+        wins, losses, draws,
+        gf_avg, gc_avg, total_goals
+      },
+      away_team: {
+        wins, losses, draws,
+        gf_avg, gc_avg, total_goals
+      },
+      both_teams_scored,
       over_25_freq, btts_freq,
-      home_ppg, home_gf_avg, home_gc_avg,
-      away_ppg, away_gf_avg, away_gc_avg
+      total_matches,
+      total_goals
     },
     advanced_stats: {             // stats agregadas del historial (de advanced_stats de cada match)
-      overall: {
-        attack: {
-          goals_for_avg, xg_for_avg, xgot_for_avg, xa_for_avg,
-          shots_for_avg, shots_on_target_for_avg, shots_off_target_for_avg,
-          blocked_shots_for_avg, shots_inside_box_for_avg, shots_outside_box_for_avg,
-          big_chances_for_avg, touches_in_opposition_box_avg, hit_woodwork_avg
-        },
-        defense: {
-          goals_against_avg, xg_against_avg, xgot_faced_avg,
-          shots_against_avg, shots_on_target_against_avg, shots_off_target_against_avg,
-          blocked_shots_against_avg, shots_inside_box_against_avg, shots_outside_box_against_avg,
-          big_chances_against_avg, touches_in_opposition_box_against_avg,
-          goalkeeper_saves_avg, errors_leading_to_shot_avg, errors_leading_to_goal_avg, goals_prevented_avg
-        },
-        control: {
-          possession_avg, passes_accuracy_avg, passes_completed_avg, passes_attempted_avg,
-          long_pass_accuracy_avg, long_passes_completed_avg, long_passes_attempted_avg,
-          final_third_pass_accuracy_avg, final_third_passes_completed_avg, final_third_passes_attempted_avg,
-          accurate_through_passes_avg
-        },
-        set_pieces_and_territory: {
-          corners_for_avg, corners_against_avg, offsides_for_avg, offsides_against_avg,
-          free_kicks_for_avg, free_kicks_against_avg, throw_ins_for_avg, throw_ins_against_avg,
-          cross_accuracy_avg, crosses_completed_avg, crosses_attempted_avg
-        },
-        discipline: {
-          yellow_cards_avg, red_cards_avg, cards_total_avg, fouls_committed_avg
-        },
-        duels_and_defending: {
-          tackles_success_pct_avg, tackles_won_avg, tackles_attempted_avg,
-          duels_won_avg, clearances_avg, interceptions_avg
-        },
-        efficiency: {
-          shot_accuracy_pct, goal_conversion_pct, big_chance_conversion_pct,
-          xg_per_shot, shots_on_target_faced_per_goal_against, save_pct,
-          finishing_overperformance, conceding_overperformance
-        },
-        derived: {
-          xg_balance_avg, xg_ratio, shots_share, shots_on_target_share,
-          big_chances_balance_avg, corners_balance_avg, discipline_balance_avg
-        }
+      // For home_team_results / away_team_results: same flat structure
+      // For h2h: split by current-match home/away identity
+      // Each sub-dict has: { overall: {...}, first_half: {...}, second_half: {...} }
+      home_team: {
+        overall: { attack: {...}, defense: {...}, control: {...}, set_pieces_and_territory: {...}, discipline: {...}, duels_and_defending: {...}, efficiency: {...}, derived: {...} },
+        first_half: { /* mismo formato que overall */ },
+        second_half: { /* mismo formato que overall */ }
       },
-      first_half: { /* mismo formato que overall */ },
-      second_half: { /* mismo formato que overall */ },
-      warnings: []
+      away_team: {
+        overall: { attack: {...}, defense: {...}, control: {...}, set_pieces_and_territory: {...}, discipline: {...}, duels_and_defending: {...}, efficiency: {...}, derived: {...} },
+        first_half: { /* mismo formato que overall */ },
+        second_half: { /* mismo formato que overall */ }
+      }
     },
-    player_stats_as_home: { minutes_total, goals_total, assists_total, shots_total, ... },
-    player_stats_as_away: { ...misma estructura... },
+    home_team_player_stats: {
+      general: { minutes_total, goals_total, assists_total, shots_total, shots_on_target_total, key_passes_total, tackles_won_total, interceptions_total, ball_recoveries_total, yellow_cards_total, red_cards_total, goals_per_90, assists_per_90, shots_per_90, position_distribution, in_base_lineup_count, substitute_count },
+      individual: {
+        [player_name]: {
+          "position": "Goalkeeper" | "Defender" | "Midfielder" | "Forward" | "Unknown",
+          offense:    { GOALS, EXPECTED_GOALS, ASSISTS_GOAL, EXPECTED_ASSISTS, SHOTS_TOTAL, SHOTS_ON_TARGET, BIG_CHANCES_CREATED, BIG_CHANCES_MISSED },
+          creation:   { KEY_PASSES, FINAL_THIRD_ENTRIES_TOTAL, BOX_ENTRIES, THROUGH_BALLS },
+          possession: { TOUCHES_TOTAL, MATCH_MINUTES_PLAYED, PASSES_TOTAL },
+          defense:    { DUELS_WON, DUELS_TOTAL, DUELS_EFFICIENCY, TACKLES_WON, INTERCEPTIONS, BALL_RECOVERIES },
+          efficiency: { PASSES_ACCURACY, LONG_BALLS_ACCURACY, CROSSES_ACCURACY, DRIBBLES_EFFICIENCY },
+          discipline: { FOULS_COMMITTED, FOULS_SUFFERED, CARDS_YELLOW, CARDS_RED, TURNOVERS, ERRORS_LEAD_TO_SHOT, ERRORS_LEAD_TO_GOAL },
+          goalkeeping:{ SAVES_TOTAL, GOALS_CONCEDED, GOALS_PREVENTED, EXPECTED_GOALS_ON_TARGET_FACED, BIG_CHANCES_SAVED },
+          derived:    { xg_per_shot, goals_minus_xg, xa_minus_assists, duels_win_pct, actions_per_90 }
+        }, ...
+      }
+    },
+    away_team_player_stats: { /* misma estructura */ },
     warnings: string[]
   },
-  "team_home_results": {
-    total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
+  "home_team_results": {
     matches: [{
       match_id, timestamp,
       goals_for, goals_against, total_goals, both_teams_scored,
@@ -391,10 +404,12 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     }],
     basic_stats: {               // stats básicos del historial
       all_matches, form_string, points,
-      gf_avg, gc_avg,
+      home_gf_avg, home_gc_avg,
       over_25_freq, btts_freq,
       home_ppg, home_gf_avg, home_gc_avg,
-      away_ppg, away_gf_avg, away_gc_avg
+      away_ppg, away_team_gf_avg, away_team_gc_avg,
+      total_matches, wins, draws, losses,
+      goals_for, goals_against, total_goals, both_teams_scored
     },
     advanced_stats: {            // stats agregadas del historial (de advanced_stats de cada match)
       overall: {
@@ -443,12 +458,26 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
       second_half: { /* mismo formato que overall */ },
       warnings: []
     },
-    player_stats_as_home: { minutes_total, goals_total, assists_total, shots_total, ... },
-    player_stats_as_away: { ...misma estructura... },
+    player_stats_as_home: {
+      general: { minutes_total, goals_total, assists_total, shots_total, shots_on_target_total, key_passes_total, tackles_won_total, interceptions_total, ball_recoveries_total, yellow_cards_total, red_cards_total, goals_per_90, assists_per_90, shots_per_90, position_distribution, in_base_lineup_count, substitute_count },
+      individual: {
+        [player_name]: {
+          "position": "Goalkeeper" | "Defender" | "Midfielder" | "Forward" | "Unknown",
+          offense:    { GOALS, EXPECTED_GOALS, ASSISTS_GOAL, EXPECTED_ASSISTS, SHOTS_TOTAL, SHOTS_ON_TARGET, BIG_CHANCES_CREATED, BIG_CHANCES_MISSED },
+          creation:   { KEY_PASSES, FINAL_THIRD_ENTRIES_TOTAL, BOX_ENTRIES, THROUGH_BALLS },
+          possession: { TOUCHES_TOTAL, MATCH_MINUTES_PLAYED, PASSES_TOTAL },
+          defense:    { DUELS_WON, DUELS_TOTAL, DUELS_EFFICIENCY, TACKLES_WON, INTERCEPTIONS, BALL_RECOVERIES },
+          efficiency: { PASSES_ACCURACY, LONG_BALLS_ACCURACY, CROSSES_ACCURACY, DRIBBLES_EFFICIENCY },
+          discipline: { FOULS_COMMITTED, FOULS_SUFFERED, CARDS_YELLOW, CARDS_RED, TURNOVERS, ERRORS_LEAD_TO_SHOT, ERRORS_LEAD_TO_GOAL },
+          goalkeeping:{ SAVES_TOTAL, GOALS_CONCEDED, GOALS_PREVENTED, EXPECTED_GOALS_ON_TARGET_FACED, BIG_CHANCES_SAVED },
+          derived:    { xg_per_shot, goals_minus_xg, xa_minus_assists, duels_win_pct, actions_per_90 }
+        }, ...
+      }
+    },
+    player_stats_as_away: { /* misma estructura */ },
     warnings: string[] | null
   },
-  "team_away_results": {
-    total_matches, wins, draws, losses, goals_for, goals_against, total_goals, both_teams_scored,
+  "away_team_results": {
     matches: [{
       match_id, timestamp,
       goals_for, goals_against, total_goals, both_teams_scored,
@@ -457,19 +486,36 @@ python scripts/build_match_context.py <event_id> <home_team_id> <away_team_id>
     }],
     basic_stats: {               // stats básicos del historial
       all_matches, form_string, points,
-      gf_avg, gc_avg,
+      home_gf_avg, home_gc_avg,
       over_25_freq, btts_freq,
       home_ppg, home_gf_avg, home_gc_avg,
-      away_ppg, away_gf_avg, away_gc_avg
+      away_ppg, away_team_gf_avg, away_team_gc_avg,
+      total_matches, wins, draws, losses,
+      goals_for, goals_against, total_goals, both_teams_scored
     },
     advanced_stats: {            // stats agregadas del historial (de advanced_stats de cada match)
-      overall: { /* mismo formato que en team_home_results */ },
+      overall: { /* mismo formato que en home_team_results */ },
       first_half: { /* mismo formato */ },
       second_half: { /* mismo formato */ },
       warnings: []
     },
-    player_stats_as_home: { minutes_total, goals_total, assists_total, shots_total, ... },
-    player_stats_as_away: { ...misma estructura... },
+    player_stats_as_home: {
+      general: { minutes_total, goals_total, assists_total, shots_total, shots_on_target_total, key_passes_total, tackles_won_total, interceptions_total, ball_recoveries_total, yellow_cards_total, red_cards_total, goals_per_90, assists_per_90, shots_per_90, position_distribution, in_base_lineup_count, substitute_count },
+      individual: {
+        [player_name]: {
+          "position": "Goalkeeper" | "Defender" | "Midfielder" | "Forward" | "Unknown",
+          offense:    { GOALS, EXPECTED_GOALS, ASSISTS_GOAL, EXPECTED_ASSISTS, SHOTS_TOTAL, SHOTS_ON_TARGET, BIG_CHANCES_CREATED, BIG_CHANCES_MISSED },
+          creation:   { KEY_PASSES, FINAL_THIRD_ENTRIES_TOTAL, BOX_ENTRIES, THROUGH_BALLS },
+          possession: { TOUCHES_TOTAL, MATCH_MINUTES_PLAYED, PASSES_TOTAL },
+          defense:    { DUELS_WON, DUELS_TOTAL, DUELS_EFFICIENCY, TACKLES_WON, INTERCEPTIONS, BALL_RECOVERIES },
+          efficiency: { PASSES_ACCURACY, LONG_BALLS_ACCURACY, CROSSES_ACCURACY, DRIBBLES_EFFICIENCY },
+          discipline: { FOULS_COMMITTED, FOULS_SUFFERED, CARDS_YELLOW, CARDS_RED, TURNOVERS, ERRORS_LEAD_TO_SHOT, ERRORS_LEAD_TO_GOAL },
+          goalkeeping:{ SAVES_TOTAL, GOALS_CONCEDED, GOALS_PREVENTED, EXPECTED_GOALS_ON_TARGET_FACED, BIG_CHANCES_SAVED },
+          derived:    { xg_per_shot, goals_minus_xg, xa_minus_assists, duels_win_pct, actions_per_90 }
+        }, ...
+      }
+    },
+    player_stats_as_away: { /* misma estructura */ },
     warnings: string[] | null
   },
   "standings": {
@@ -536,7 +582,7 @@ Cada capa tiene: inputs, cálculos, output obligatorio, degradación.
 - Partido: [Home] vs [Away]
 - Competición: [Liga]
 - Fecha/hora: [ISO 8601]
-- Estado: [notstarted]
+- Estado: [notstarted/inprogress]
 ---
 Mercado dice [ODDS]:
 - [Home]: [prob]% | Draw: [prob]% | [Away]: [prob]%
@@ -594,7 +640,7 @@ Resultado vs expectativa [ODDS]/[IND]:
 
 [Home] [IND] [marcador si inprogress]:
   Forma: [form_string] — [pts] pts / [N] pts posibles
-  Goles: [gf_avg]/[gc_avg]
+  Goles: [home_gf_avg]/[home_gc_avg]
   Over 2.5: [X/N] | BTTS: [X/N] (si hay datos)
   En casa: [home_ppg] ppg | [home_goals]GF / [home_goals]GC
   Perfil: [ofensivo/conservador/equilibrado/inestable]
@@ -602,7 +648,7 @@ Resultado vs expectativa [ODDS]/[IND]:
 [ away ] [IND]:
   [mismo formato]
 
-H2H [IND]: [X]PJ — [team_home_wins]V-local [draws]E [team_away_wins]V-visitante | goles local [team_home_goals_for] / visitante [team_away_goals_for]
+H2H [IND]: [X]PJ — [home_team_wins]V-local [draws]E [away_team_wins]V-visitante | goles local [home_team_goals_for] / visitante [away_team_goals_for]
   [score reciente 1]
   [score reciente 2]
 
@@ -816,7 +862,7 @@ Capa 4 NO puede contener:
 Solo descripción estructurada de datos comparables entre equipos.
 ```
 
-**Inputs:** historial de equipos (`team_home_results`, `team_away_results`, `h2h`), odds.
+**Inputs:** historial de equipos (`home_team_results`, `away_team_results`, `h2h`), odds.
 
 **Cálculos:**
 
@@ -919,10 +965,11 @@ Contradicciones:
 ¿Sostenible?
 - sí/no — [razón basada en evidencia]
 
-[Para inprogress:]
+[Para inprogress: usando `live_analysis` y `summary.events`]
 Análisis en vivo: El marcador [X-X] [refleja/no refleja] lo que muestran las stats (xG: [xg_home]-[xg_away], posesión: [pos_home]%-[pos_away]%).
 [¿El equipo [X] domina aunque no esté ganando?]
 [¿Los últimos eventos cambiaron la dinámica?]
+[`live_analysis` proporciona probabilidades actualizadas para cada mercado.]
 ```
 
 **Degradación:**
@@ -1016,16 +1063,22 @@ Over 1.5: [X]% | Over 2.5: [Y]% | BTTS: [Z]%
 Tipo: [cerrado/abierto/defensivo/competido]
 Confianza: [muy baja/baja/media/media-alta/alta] — [motivo de la calificación]
 
-[Para inprogress:]
+[Para inprogress: usando `live_analysis`]
 Marcador actual: [Home] [X] - [Y] [Away] — [minuto]'
 xG acumulado: [Home] [X.XX] | [Away] [Y.XX]
+
+Señales en vivo [live_analysis]:
+- Over 2.5: [probability]% | BTTS: [probability]%
+- Próximo gol — Home: [probability]% | Away: [probability]% | No más goles: [probability]%
+- Esquinas próximo: [lean] | Señal: [signal]
+- 1X2 final — Home: [probability]% | Empate: [probability]% | Away: [probability]%
+
 Resultado esperado al final: [Home] [X] - [Y] [Away] (basado en xG y tiempo restante)
-Over 2.5: [X]% | BTTS: [Y]% (actualizado con datos inlive)
 Tipo de partido: [cerrado/abierto/defensivo/competido]
 Confianza: [muy baja/baja/media/media-alta/alta] — [motivo de la calificación]
 [¿El equipo que está perdiendo merece estar abajo?]
 
-Nota: "Predictiva basada en odds y stats históricas [y xG inlive para inprogress]."
+Nota: "Predictiva basada en `live_analysis` + odds históricas."
 ```
 
 **Degradación:**

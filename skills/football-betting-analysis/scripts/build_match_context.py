@@ -18,6 +18,7 @@ import time
 import re
 import html
 import random
+import math
 import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -134,6 +135,15 @@ def fetch_match_lineups(event_id: str) -> Optional[List]:
     """Get lineups + missing players."""
     return api_get("/matches/match/lineups", params={"match_id": event_id})
 
+
+def fetch_match_summary(event_id: str) -> Optional[List]:
+    """Get match summary with key events (goals, cards, etc.)."""
+    return api_get("/matches/match/summary", params={"match_id": event_id})
+
+
+def fetch_match_commentary(event_id: str) -> Optional[List]:
+    """Get minute-by-minute commentary."""
+    return api_get("/matches/match/commentary", params={"match_id": event_id})
 
 def fetch_team_results(team_id: str, page: int = 1) -> Optional[Dict]:
     """Get recent match results for a team."""
@@ -507,14 +517,20 @@ def _resolve_goals(m: Dict) -> tuple:
 
 def _compute_results_basic_stats(matches: List[Dict]) -> Dict:
     """
-    Compute basic stats (all_matches, form_string, points, gf_avg, gc_avg,
-    over_25_freq, btts_freq, home_*/away_*) from a list of matches.
+    Compute basic stats (all_matches, form_string, points, home_gf_avg,
+    home_gc_avg, over_25_freq, btts_freq, home_*/away_*) from a list of matches.
+
+    Renamed fields for disambiguation in h2h context:
+      gf_avg     -> home_gf_avg   (analyzed team goals scored avg when playing at home)
+      gc_avg     -> home_gc_avg   (analyzed team goals conceded avg when playing at home)
+      away_gf_avg -> away_team_gf_avg
+      away_gc_avg -> away_team_gc_avg
     """
     n = len(matches)
     if n == 0:
         return {
             "all_matches": 0, "form_string": None, "points": 0,
-            "gf_avg": None, "gc_avg": None,
+            "home_gf_avg": None, "home_gc_avg": None,
             "over_25_freq": None, "btts_freq": None,
         }
 
@@ -543,8 +559,8 @@ def _compute_results_basic_stats(matches: List[Dict]) -> Dict:
         "all_matches": n,
         "form_string": "".join(form_records) or None,
         "points": pts,
-        "gf_avg": round(gf / n, 2),
-        "gc_avg": round(gc / n, 2),
+        "home_gf_avg": round(gf / n, 2),
+        "home_gc_avg": round(gc / n, 2),
         "over_25_freq": f"{over_count}/{n}",
         "btts_freq": f"{btts_count}/{n}",
     }
@@ -571,21 +587,129 @@ def _compute_results_basic_stats(matches: List[Dict]) -> Dict:
                     else 0 for m in away_matches)
         k = len(away_matches)
         result["away_ppg"] = round(a_pts / k, 2)
-        result["away_gf_avg"] = round(a_gf / k, 2)
-        result["away_gc_avg"] = round(a_gc / k, 2)
+        result["away_team_gf_avg"] = round(a_gf / k, 2)
+        result["away_team_gc_avg"] = round(a_gc / k, 2)
 
     return result
 
 
-def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, home_name: str, away_name: str) -> Dict:
+def _compute_h2h_basic_stats(matches: List[Dict], current_home_name: str, current_away_name: str) -> Dict:
+    """
+    Compute basic stats for h2h context, where 'home' always refers to the
+    team that IS the HOME team in the CURRENT analyzed match (e.g. Bayern),
+    and 'away' refers to the team that IS the AWAY team in the CURRENT analyzed
+    match (e.g. Real Madrid).
+
+    current_home_name / current_away_name identify which team in each h2h match
+    corresponds to current home/away, regardless of whether that team was
+    home or away in the historical h2h encounter.
+
+    For each h2h match, goals are attributed to the current-home / current-away
+    team by matching the current team names against home_team / away_team in the
+    h2h match object.
+
+    Excludes form_string, points, home_ppg, away_ppg — not meaningful in h2h.
+    """
+    n = len(matches)
+    if n == 0:
+        return {
+            "home_team": {
+                "wins": 0, "losses": 0, "draws": 0,
+                "gf_avg": None, "gc_avg": None, "total_goals": 0,
+            },
+            "away_team": {
+                "wins": 0, "losses": 0, "draws": 0,
+                "gf_avg": None, "gc_avg": None, "total_goals": 0,
+            },
+            "both_teams_scored": None,
+            "over_25_freq": None,
+            "btts_freq": None,
+            "total_matches": 0,
+            "total_goals": 0,
+        }
+
+    home_gf = home_gc = away_gf = away_gc = 0
+    home_wins = away_wins = draws = 0
+    total_goals = 0
+    over_count = btts_count = 0
+
+    for m in matches:
+        hs = m.get("home_score", 0) or 0
+        aw = m.get("away_score", 0) or 0
+        tg = hs + aw
+
+        h2h_home = m.get("home_team", "")
+        h2h_away = m.get("away_team", "")
+
+        if h2h_home == current_home_name:
+            # Current home team was home in this h2h → their goals are hs
+            home_gf += hs
+            home_gc += aw
+            # Current away team was away in this h2h → their goals are aw
+            away_gf += aw
+            away_gc += hs
+            if hs > aw:
+                home_wins += 1
+            elif hs < aw:
+                away_wins += 1
+            else:
+                draws += 1
+        elif h2h_away == current_home_name:
+            # Current home team was away in this h2h → their goals are aw
+            home_gf += aw
+            home_gc += hs
+            # Current away team was home in this h2h → their goals are hs
+            away_gf += hs
+            away_gc += aw
+            if aw > hs:
+                home_wins += 1
+            elif aw < hs:
+                away_wins += 1
+            else:
+                draws += 1
+
+        total_goals += tg
+        if tg > 2.5:
+            over_count += 1
+        if hs > 0 and aw > 0:
+            btts_count += 1
+
+    result = {
+        "home_team": {
+            "wins": home_wins,
+            "losses": away_wins,
+            "draws": draws,
+            "gf_avg": round(home_gf / n, 2),
+            "gc_avg": round(home_gc / n, 2),
+            "total_goals": home_gf,
+        },
+        "away_team": {
+            "wins": away_wins,
+            "losses": home_wins,
+            "draws": draws,
+            "gf_avg": round(away_gf / n, 2),
+            "gc_avg": round(away_gc / n, 2),
+            "total_goals": away_gf,
+        },
+        "both_teams_scored": f"{btts_count}/{n}",
+        "over_25_freq": f"{over_count}/{n}",
+        "btts_freq": f"{btts_count}/{n}",
+        "total_matches": n,
+        "total_goals": total_goals,
+    }
+
+    return result
+
+
+def build_h2h_from_results(home_team_results: Dict, away_team_results: Dict, home_name: str, away_name: str) -> Dict:
     """
     Build H2H matches from the two teams' match histories.
     Filters matches where the opponent was the direct rival.
     This replaces the separate H2H API call to avoid redundancy.
     """
     match_map: Dict[str, Dict] = {}
-    home_matches = team_home_results.get("matches", [])
-    away_matches = team_away_results.get("matches", [])
+    home_matches = home_team_results.get("matches", [])
+    away_matches = away_team_results.get("matches", [])
 
     def to_actual_scores(m: Dict) -> tuple[int, int]:
         """
@@ -658,8 +782,8 @@ def build_h2h_from_results(team_home_results: Dict, team_away_results: Dict, hom
 
     matches = sorted(match_map.values(), key=lambda r: r.get("timestamp") or 0, reverse=True)
 
-    # Compute form.basic from h2h matches (with team_is_home orientation)
-    form_basic = _compute_results_basic_stats(matches)
+    # Compute h2h basic stats with explicit team breakdown
+    form_basic = _compute_h2h_basic_stats(matches, home_name, away_name)
 
     return {
         "matches": matches,
@@ -737,6 +861,19 @@ def normalize_team_results(team_results_data: Dict, team_name: str, team_id: str
 
     # Compute basic stats via shared helper
     basic_stats = _compute_results_basic_stats(all_matches)
+
+    # Add explicit top-level summary stats into basic_stats
+    explicit = _compute_top_level_stats(all_matches)
+    basic_stats.update({
+        "total_matches": explicit["total_matches"],
+        "wins": explicit["wins"],
+        "draws": explicit["draws"],
+        "losses": explicit["losses"],
+        "goals_for": explicit["goals_for"],
+        "goals_against": explicit["goals_against"],
+        "total_goals": explicit["total_goals"],
+        "both_teams_scored": explicit["both_teams_scored"],
+    })
 
     result = {
         "matches": all_matches,
@@ -1112,18 +1249,892 @@ def compute_advanced_form(matches: List[Dict]) -> Dict:
         "overall": compute_category_averages(valid, "match"),
         "first_half": compute_category_averages(valid, "1st-half"),
         "second_half": compute_category_averages(valid, "2nd-half"),
-        "warnings": [],
     }
     if n < total:
-        result["warnings"].append(f"advanced_stats_partial: {n}/{total} matches con stats")
+        result["warnings"] = [f"advanced_stats_partial: {n}/{total} matches con stats"]
     if n == 0:
         result = {
             "overall": {},
             "first_half": {},
             "second_half": {},
-            "warnings": ["No advanced stats available"],
         }
     return result
+
+
+def compute_h2h_advanced_stats(
+    matches: List[Dict],
+    stats_map: Dict,
+    current_home_name: str,
+    current_away_name: str,
+) -> Dict:
+    """
+    Compute advanced stats for h2h context split into two team perspectives:
+      - home_team: stats of the team that IS home in the CURRENT match
+      - away_team: stats of the team that IS away in the CURRENT match
+
+    For each h2h match we look up raw_stats from stats_map and determine whether
+    the current home team was home or away in that historical encounter by matching
+    current_home_name against home_team/away_team in the match record. Then we call
+    normalize_advanced_stats with the appropriate team_is_home flag so that the
+    resulting stats are always expressed from the current team's perspective.
+
+    Each sub-dict has the same structure as compute_advanced_form output:
+    { overall: { attack, defense, control, ... }, first_half: {...}, second_half: {...} }
+    """
+    home_perspective_matches: List[Dict] = []
+    away_perspective_matches: List[Dict] = []
+
+    for m in matches:
+        mid = m.get("match_id")
+        raw_stats = stats_map.get(mid)
+        if not raw_stats:
+            placeholder = {"match_id": mid, "advanced_stats": {"warnings": ["Stats not available"]}}
+            home_perspective_matches.append(placeholder)
+            away_perspective_matches.append(placeholder)
+            continue
+
+        h2h_home = m.get("home_team", "")
+        h2h_away = m.get("away_team", "")
+
+        # Determine if current home team was home or away in this h2h match
+        current_home_was_home = (h2h_home == current_home_name)
+
+        if current_home_was_home:
+            # Current home team (Bayern) was home in this h2h → their perspective = team_is_home=True
+            home_stats = normalize_advanced_stats(raw_stats, team_is_home=True)
+            # Current away team (Real) was away in this h2h → their perspective = team_is_home=False
+            away_stats = normalize_advanced_stats(raw_stats, team_is_home=False)
+        else:
+            # Current home team (Bayern) was away in this h2h → their perspective = team_is_home=False
+            home_stats = normalize_advanced_stats(raw_stats, team_is_home=False)
+            # Current away team (Real) was home in this h2h → their perspective = team_is_home=True
+            away_stats = normalize_advanced_stats(raw_stats, team_is_home=True)
+
+        home_perspective_matches.append({"match_id": mid, "advanced_stats": home_stats})
+        away_perspective_matches.append({"match_id": mid, "advanced_stats": away_stats})
+
+    return {
+        "home_team": compute_advanced_form(home_perspective_matches),
+        "away_team": compute_advanced_form(away_perspective_matches),
+    }
+
+
+def normalize_summary(raw: Any) -> Optional[Dict]:
+    """
+    Normalize match summary (key events: goals, cards, substitutions, etc.).
+    Returns {events: [{minutes, team, type, description, players}]}.
+    """
+    if not raw:
+        return None
+
+    events = []
+    items = raw if isinstance(raw, list) else raw.get("events", []) if isinstance(raw, dict) else []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        event_type = item.get("type") or ""
+        # Normalize type to our vocabulary
+        type_map = {
+            "goal": "goal",
+            "own_goal": "own_goal",
+            "penalty_goal": "penalty_goal",
+            "penalty_missed": "penalty_missed",
+            "substitution": "substitution",
+            "var": "var",
+            "yellow_card": "yellow_card",
+            "red_card": "red_card",
+            "second_yellow": "second_yellow",
+        }
+        normalized_type = type_map.get(event_type.lower(), event_type)
+
+        # Extract team
+        team_val = item.get("team")
+        if team_val == "home":
+            team = "home"
+        elif team_val == "away":
+            team = "away"
+        else:
+            team = None
+
+        # Extract players
+        players = []
+        for p in item.get("players", []) or []:
+            players.append({
+                "name": p.get("name"),
+                "player_id": p.get("player_id"),
+            })
+
+        # Extract minute
+        minutes_val = item.get("minutes")
+        try:
+            minutes = int(minutes_val) if minutes_val is not None else None
+        except (ValueError, TypeError):
+            minutes = None
+
+        events.append({
+            "minutes": minutes,
+            "team": team,
+            "type": normalized_type,
+            "description": item.get("description"),
+            "players": players,
+        })
+
+    return {"events": events}
+
+
+def normalize_commentary(raw: Any) -> Optional[Dict]:
+    """
+    Normalize minute-by-minute commentary.
+    Returns {commentary: [{minutes, description}]}.
+    """
+    if not raw:
+        return None
+
+    commentary = []
+    items = raw if isinstance(raw, list) else raw.get("commentary", []) if isinstance(raw, dict) else []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        minutes_val = item.get("minutes")
+        try:
+            minutes = int(minutes_val) if minutes_val is not None else None
+        except (ValueError, TypeError):
+            minutes = None
+
+        commentary.append({
+            "minutes": minutes,
+            "description": item.get("description"),
+        })
+
+    return {"commentary": commentary}
+
+def normalize_match_stats(raw: Optional[Dict]) -> Dict:
+    """
+    Normalize raw output from fetch_match_stats() for live match.
+    Unlike normalize_advanced_stats, this does NOT swap for/against
+    based on team_is_home — returns raw home/away orientation.
+
+    Returns:
+        {
+          "match":     { stat_key: { "home": value, "away": value }, ... },
+          "1st-half":  { stat_key: { "home": value, "away": value }, ... },
+          "2nd-half":  { stat_key: { "home": value, "away": value }, ... },
+          "warnings":  []
+        }
+    """
+    result = {
+        "match": {},
+        "1st-half": {},
+        "2nd-half": {},
+        "warnings": [],
+    }
+
+    if not raw:
+        result["warnings"].append("Match stats not available [N/A]")
+        return result
+
+    for period_key in ("match", "1st-half", "2nd-half"):
+        period_data = raw.get(period_key, [])
+        if not isinstance(period_data, list):
+            continue
+
+        seen_names: set = set()
+
+        for item in period_data:
+            if not isinstance(item, dict):
+                continue
+
+            stat_name = item.get("name")
+            if not stat_name:
+                continue
+
+            if stat_name in seen_names:
+                continue
+            seen_names.add(stat_name)
+
+            key = stat_name_to_key(stat_name)
+            if key is None:
+                # Try parsing as pass-type stat
+                parsed = parse_pass_stat(item.get("home_team"))
+                if parsed.get("pct") is not None:
+                    result[period_key][stat_name] = {
+                        "home": parsed,
+                        "away": parse_pass_stat(item.get("away_team")),
+                    }
+                continue
+
+            home_val = item.get("home_team")
+            away_val = item.get("away_team")
+
+            if key in PASS_TYPE_STATS:
+                result[period_key][key] = {
+                    "home": parse_pass_stat(home_val),
+                    "away": parse_pass_stat(away_val),
+                }
+            elif key == "possession":
+                home_int = int(re.sub(r"\D", "", str(home_val))) if home_val else 0
+                away_int = int(re.sub(r"\D", "", str(away_val))) if away_val else 0
+                result[period_key][key] = {"home": home_int, "away": away_int}
+            else:
+                def direct(val: Any) -> Any:
+                    if val is None:
+                        return None
+                    if isinstance(val, (int, float)):
+                        return val
+                    s = str(val).strip()
+                    if s == "-" or s == "":
+                        return None
+                    try:
+                        return float(s)
+                    except ValueError:
+                        return s
+
+                result[period_key][key] = {
+                    "home": direct(home_val),
+                    "away": direct(away_val),
+                }
+
+    return result
+
+
+def _safe_optional(val, default=None):
+    """Safe numeric conversion."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_stat(stats: Dict, key: str, side: str) -> Optional[float]:
+    """Get a stat value safely from live match stats."""
+    if not stats:
+        return None
+    period = stats.get("match", {})
+    if not period:
+        return None
+    stat = period.get(key, {})
+    if isinstance(stat, dict):
+        return _safe_optional(stat.get(side))
+    return None
+
+
+def _infer_minute(summary: Optional[Dict], match_stats: Optional[Dict]) -> int:
+    """Infer current match minute from summary events or stats."""
+    if summary:
+        events = summary.get("events", [])
+        if events:
+            # Use the last non-null minute
+            for e in reversed(events):
+                if e.get("minutes") is not None:
+                    return e["minutes"]
+    if match_stats:
+        # Try to get minute from match stats
+        periods = match_stats.get("match", {})
+        for key in ("elapsed", "minute", "time"):
+            if key in periods:
+                return int(periods[key])
+    return 0
+
+
+# =============================================================================
+# LIVE PROBABILITY ENGINE
+# =============================================================================
+
+def build_live_state(match_data: Dict, match_minute: int, injury_time: int = 0) -> Dict:
+    """
+    Build a clean, normalized live state snapshot from raw match data.
+    This is the FOUNDATION — all probability calculations depend on it.
+    """
+    summary = match_data.get("summary") or {}
+    events = summary.get("events", [])
+    match_stats = match_data.get("match_stats") or {}
+    # Normalize: stats may be at root or nested under ["match"]
+    stats_root = match_stats.get("match", match_stats)
+    lineups = match_data.get("lineups") or {}
+
+    # --- Score: primary source match["scores"], fallback to events parsing ---
+    match_scores = match_data.get("scores", {}) or {}
+    _home_from_scores = match_scores.get("home")
+    _away_from_scores = match_scores.get("away")
+
+    # Card counters always from events (no card counts in scores)
+    yellow_cards_home = 0
+    yellow_cards_away = 0
+    red_cards_home = 0
+    red_cards_away = 0
+
+    # If scores not in primary source, parse events
+    if _home_from_scores is None or _away_from_scores is None:
+        home_goals = 0
+        away_goals = 0
+        for e in events:
+            e_type = e.get("type", "")
+            e_text = str(e.get("text", "") or "")
+            e_team = e.get("team", "")
+
+            is_goal = (e_type == "goal") or ("goal" in e_text.lower() and "own" not in e_text.lower())
+            if is_goal and e_team == "home":
+                home_goals += 1
+            elif is_goal and e_team == "away":
+                away_goals += 1
+
+            if e_type == "yellow_card" or "yellow" in e_text.lower():
+                if e_team == "home":
+                    yellow_cards_home += 1
+                elif e_team == "away":
+                    yellow_cards_away += 1
+
+            if e_type == "red_card" or "red card" in e_text.lower():
+                if e_team == "home":
+                    red_cards_home += 1
+                elif e_team == "away":
+                    red_cards_away += 1
+
+        # Also try commentary as semantic fallback if events gave no goals
+        # Only use commentary if team names are available for reliable matching
+        if home_goals == 0 and away_goals == 0:
+            home_team_name = str(match_data.get("home_team_name") or "").lower()
+            away_team_name = str(match_data.get("away_team_name") or "").lower()
+            commentary_data = match_data.get("commentary") or {}
+            commentary_items = commentary_data.get("commentary", []) or []
+            for c in commentary_items:
+                desc = str(c.get("description") or "").lower()
+                minute = c.get("minutes")
+                if "goal" in desc and "own" not in desc and minute is not None:
+                    # Map to home/away using real team names — never "1st"/"2nd" as proxy
+                    if home_team_name and home_team_name in desc:
+                        home_goals += 1
+                    elif away_team_name and away_team_name in desc:
+                        away_goals += 1
+    else:
+        home_goals = _home_from_scores
+        away_goals = _away_from_scores
+
+    score = {"home": home_goals, "away": away_goals}
+    goals_so_far = home_goals + away_goals
+
+    # --- Stats from match_stats (safe access) ---
+    def sstat(key, side):
+        v = stats_root.get(key, {})
+        return v.get(side) if isinstance(v, dict) else None
+
+    xg_home = sstat("xg", "home") or 0.0
+    xg_away = sstat("xg", "away") or 0.0
+    xg_total = xg_home + xg_away
+
+    shots_home = sstat("shots", "home") or 0
+    shots_away = sstat("shots", "away") or 0
+    shots_total = shots_home + shots_away
+
+    sot_home = sstat("shots_on_target", "home") or 0
+    sot_away = sstat("shots_on_target", "away") or 0
+
+    bc_home = sstat("big_chances", "home") or 0
+    bc_away = sstat("big_chances", "away") or 0
+
+    corners_home = sstat("corners", "home") or 0
+    corners_away = sstat("corners", "away") or 0
+
+    yc_home = sstat("yellow_cards", "home") or yellow_cards_home or 0
+    yc_away = sstat("yellow_cards", "away") or yellow_cards_away or 0
+    rc_home = sstat("red_cards", "home") or red_cards_home or 0
+    rc_away = sstat("red_cards", "away") or red_cards_away or 0
+
+    poss_home = sstat("possession", "home") or 50.0
+    poss_away = sstat("possession", "away") or 50.0
+
+    # --- Lineup context ---
+    home_lineup = lineups.get("home", {}) or {}
+    away_lineup = lineups.get("away", {}) or {}
+
+    missing_home = home_lineup.get("missing_players") or []
+    missing_away = away_lineup.get("missing_players") or []
+
+    # --- Derived features ---
+    xg_diff = xg_home - xg_away
+    time_remaining = max(90 - match_minute, 0)
+    minute = match_minute
+
+    # xG rates (goals per minute)
+    xg_rate_home = xg_home / max(minute, 1)
+    xg_rate_away = xg_away / max(minute, 1)
+
+    # Score effect: winning team typically sits deeper
+    # Using 1/(1 + 0.20*diff) — 3-0 → 0.625x for more aggressive sit-back
+    score_diff = home_goals - away_goals
+    score_effect_home = 1.0 / (1.0 + 0.20 * max(score_diff, 0))
+    score_effect_away = 1.0 / (1.0 + 0.20 * max(-score_diff, 0))
+
+    # Data quality check
+    warnings = []
+    if shots_total == 0 and minute > 10:
+        warnings.append("no_shots_registered")
+    if xg_total == 0 and shots_total > 5:
+        warnings.append("xg_zero_with_shots_unusual")
+    if minute > 45 and goals_so_far == 0 and xg_total < 0.5:
+        warnings.append("very_low_action_late")
+
+    # Data quality check — multi-signal, not just absence of warnings
+    # high: full consistency across scores + stats + events + commentary + minute > 20
+    # medium: base stats present but some inconsistency or missing signals
+    # low: early minute, missing stats, or contradictory sources
+    has_scores_primary = (_home_from_scores is not None and _away_from_scores is not None)
+    has_base_stats = shots_total >= 3 and xg_total > 0
+    has_rich_events = any((e.get("type") or e.get("description") or e.get("text")) for e in events)
+    commentary_raw = match_data.get("commentary")
+    commentary_items = commentary_raw.get("commentary", []) if isinstance(commentary_raw, dict) else (commentary_raw if isinstance(commentary_raw, list) else [])
+    has_usable_commentary = any(c.get("minutes") is not None and c.get("description") for c in commentary_items)
+    minute_ok = minute >= 10
+
+    if has_scores_primary and has_base_stats and has_rich_events and has_usable_commentary and minute_ok:
+        data_quality = "high"
+    elif has_base_stats and minute_ok:
+        data_quality = "medium"
+    else:
+        data_quality = "low"
+
+    return {
+        "minute": minute,
+        "time_remaining": time_remaining,
+        "score": score,
+        "goals_so_far": goals_so_far,
+        "xg": {"home": xg_home, "away": xg_away},
+        "xg_total": xg_total,
+        "xg_diff": xg_diff,
+        "xg_rate_home": xg_rate_home,
+        "xg_rate_away": xg_rate_away,
+        "xgot": {"home": sstat("xgot", "home") or 0.0, "away": sstat("xgot", "away") or 0.0},
+        "shots": {"home": shots_home, "away": shots_away},
+        "shots_total": shots_total,
+        "shots_on_target": {"home": sot_home, "away": sot_away},
+        "big_chances": {"home": bc_home, "away": bc_away},
+        "corners": {"home": corners_home, "away": corners_away},
+        "yellow_cards": {"home": yc_home, "away": yc_away},
+        "red_cards": {"home": rc_home, "away": rc_away},
+        "possession": {"home": poss_home, "away": poss_away},
+        "lineups": {
+            "home": {"missing_count": len(missing_home), "red_card": bool(rc_home > 0), "substitutions_made": home_lineup.get("substitutions_made", 0)},
+            "away": {"missing_count": len(missing_away), "red_card": bool(rc_away > 0), "substitutions_made": away_lineup.get("substitutions_made", 0)},
+        },
+        "score_effect_home": score_effect_home,
+        "score_effect_away": score_effect_away,
+        "data_quality": data_quality,
+        "warnings": warnings,
+        "events": events,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POISSON UTILITIES
+# ---------------------------------------------------------------------------
+
+def _poisson_pmf(k: int, lam: float) -> float:
+    """Probability of exactly k events given Poisson lambda."""
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    if k > 100:
+        return 0.0
+    return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+
+def _poisson_at_least(k: int, lam: float) -> float:
+    """P(X >= k) for Poisson via 1 - P(X < k) = 1 - sum(i=0 to k-1) PMF(i)."""
+    if k <= 0:
+        return 1.0
+    # Compute CDF up to k-1 (P(X < k)) then subtract from 1
+    total = 0.0
+    for i in range(k):
+        total += _poisson_pmf(i, lam)
+        if total > 0.9999:
+            break
+    return min(1.0 - total, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# POISSON GOAL ENGINE
+# ---------------------------------------------------------------------------
+
+BASELINE_RATE = 1.2 / 90  # ~0.013 goals per minute — floor for lambda
+
+
+def poisson_goal_engine(state: Dict) -> Dict:
+    """
+    Unified goal probability engine.
+    All goal-based markets (O/U, BTTS, next goal) derive from shared
+    Poisson lambdas estimated from live state.
+    """
+    minute = state["minute"]
+    time_remaining = state["time_remaining"]
+    goals_so_far = state["goals_so_far"]
+    score = state["score"]
+    xg_home = state["xg"]["home"]
+    xg_away = state["xg"]["away"]
+    data_quality = state.get("data_quality", "medium")
+    warnings = list(state.get("warnings", []))
+
+    # --- Estimate per-team goal rates ---
+    rate_home = max(xg_home / max(minute, 1), BASELINE_RATE)
+    rate_away = max(xg_away / max(minute, 1), BASELINE_RATE)
+
+    # Apply score effect (winning team typically sits deeper)
+    rate_home *= state.get("score_effect_home", 1.0)
+    rate_away *= state.get("score_effect_away", 1.0)
+
+    # Enhance rates using advanced stats (shots on target, big chances)
+    sot_home = state["shots_on_target"]["home"]
+    sot_away = state["shots_on_target"]["away"]
+    bc_home = state["big_chances"]["home"]
+    bc_away = state["big_chances"]["away"]
+    shots_home = state["shots"]["home"]
+    shots_away = state["shots"]["away"]
+
+    if shots_home > 0:
+        rate_home *= (1.0 + 0.15 * (sot_home / shots_home))
+    if shots_away > 0:
+        rate_away *= (1.0 + 0.15 * (sot_away / shots_away))
+    rate_home *= (1.0 + 0.10 * bc_home)
+    rate_away *= (1.0 + 0.08 * min(bc_away, 3))
+
+    # xGOT boost: quality of shots on target (better than raw xG alone)
+    # xGOT = expected goals on target, more discriminative than raw xG
+    xg_home = state["xg"]["home"]
+    xg_away = state["xg"]["away"]
+    xgot_home = state.get("xgot", {}).get("home", 0)
+    xgot_away = state.get("xgot", {}).get("away", 0)
+    if xg_home > 0:
+        xgot_ratio_home = min(xgot_home / max(xg_home, 0.01), 3.0)  # cap at 3x
+        rate_home *= (1.0 + 0.20 * (xgot_ratio_home - 1.0))
+    if xg_away > 0:
+        xgot_ratio_away = min(xgot_away / max(xg_away, 0.01), 3.0)
+        rate_away *= (1.0 + 0.20 * (xgot_ratio_away - 1.0))
+
+    # Time non-linearity: intensity decays slightly toward end
+    time_factor = (time_remaining / 90) ** 0.85
+
+    lambda_home = rate_home * time_remaining * time_factor
+    lambda_away = rate_away * time_remaining * time_factor
+
+    # Low data quality warning (don't reduce lambdas — keep expectations stable)
+    if data_quality == "low":
+        warnings.append("low_data_quality_adjustment")
+
+    # --- Over/Under 2.5 ---
+    goals_to_over = max(3 - goals_so_far, 0)
+    if goals_to_over == 0:
+        over_prob = 1.0
+    else:
+        lambda_total = lambda_home + lambda_away
+        over_prob = _poisson_at_least(goals_to_over, lambda_total)
+
+    under_prob = round(1.0 - over_prob, 4)
+
+    # --- BTTS ---
+    home_scored = score["home"] > 0
+    away_scored = score["away"] > 0
+
+    if home_scored and away_scored:
+        btts_yes = 1.0
+    elif home_scored:
+        btts_yes = 1.0 - _poisson_pmf(0, lambda_away)
+    elif away_scored:
+        btts_yes = 1.0 - _poisson_pmf(0, lambda_home)
+    else:
+        p_home_scores = 1.0 - _poisson_pmf(0, lambda_home)
+        p_away_scores = 1.0 - _poisson_pmf(0, lambda_away)
+        btts_yes = p_home_scores * p_away_scores
+
+    btts_no = round(1.0 - btts_yes, 4)
+
+    # --- Next goal (competing risks with explicit no_more_goals) ---
+    total_rate = lambda_home + lambda_away
+
+    # Survival probability: no more goals scored
+    next_no_more = math.exp(-total_rate)
+
+    # Conditional on a goal being scored: home vs away
+    if total_rate > 0 and next_no_more < 1.0:
+        # P(home | goal) = lambda_home / (lambda_home + lambda_away)
+        # P(away | goal) = lambda_away / (lambda_home + lambda_away)
+        # P(goal) = 1 - next_no_more
+        # So P(home) = (1 - next_no_more) * lambda_home / total_rate
+        # And P(away) = (1 - next_no_more) * lambda_away / total_rate
+        # This guarantees sum = 1.0
+        next_home = (1.0 - next_no_more) * (lambda_home / total_rate)
+        next_away = (1.0 - next_no_more) * (lambda_away / total_rate)
+    else:
+        next_home = 0.0
+        next_away = 0.0
+        next_no_more = 1.0
+
+    return {
+        "over_under_2_5": {
+            "probabilities": {"over": round(over_prob, 4), "under": under_prob},
+            "model_version": "poisson_v1",
+            "calibrated": False,
+            "inputs_quality": data_quality,
+            "top_factors": ["xg_remaining", "goals_so_far", "minute"],
+            "lambda_home": round(lambda_home, 3),
+            "lambda_away": round(lambda_away, 3),
+            "warnings": warnings,
+        },
+        "btts": {
+            "probabilities": {"yes": round(btts_yes, 4), "no": btts_no},
+            "model_version": "poisson_v1",
+            "calibrated": False,
+            "inputs_quality": data_quality,
+            "top_factors": ["score", "lambda_home", "lambda_away"],
+            "warnings": warnings,
+        },
+        "next_goal": {
+            "probabilities": {
+                "home": round(next_home, 4),
+                "away": round(next_away, 4),
+                "no_more_goals": round(next_no_more, 4),
+            },
+            "model_version": "poisson_v1",
+            "calibrated": False,
+            "inputs_quality": data_quality,
+            "top_factors": ["lambda_home", "lambda_away", "total_rate", "minute"],
+            "warnings": warnings,
+        },
+        "_internal": {
+            "lambda_home": lambda_home,
+            "lambda_away": lambda_away,
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# PREMATCH + LIVE 1X2
+# ---------------------------------------------------------------------------
+
+def compute_prematch_priors(odds_data: Dict, home_team_results: Dict, away_team_results: Dict) -> Dict:
+    """
+    Compute pre-match 1X2 priors from closing odds (preferred) or Elo fallback.
+    Returns: {"1x2": {"home": float, "draw": float, "away": float, "source": str}}
+    """
+    odds_home = odds_data.get("odds_home")
+    odds_draw = odds_data.get("odds_draw")
+    odds_away = odds_data.get("odds_away")
+
+    if odds_home and odds_draw and odds_away:
+        raw = [1/odds_home, 1/odds_draw, 1/odds_away]
+        total = sum(raw)
+        if total > 0:
+            return {
+                "1x2": {
+                    "home": round(raw[0] / total, 4),
+                    "draw": round(raw[1] / total, 4),
+                    "away": round(raw[2] / total, 4),
+                    "source": "closing_odds",
+                }
+            }
+
+    def elo_from_results(results: Dict) -> float:
+        matches = results.get("matches", [])
+        if not matches:
+            return 0.5
+        pts = results.get("basic_stats", {}).get("points", 0)
+        n = len(matches)
+        return min(pts / (n * 3), 1.0)
+
+    elo_home = elo_from_results(home_team_results)
+    elo_away = elo_from_results(away_team_results)
+
+    elo_home_adj = elo_home + 0.06
+    elo_away_adj = elo_away
+
+    elo_diff = elo_home_adj - elo_away_adj
+    p_home_win = 1.0 / (1.0 + 10 ** (-elo_diff * 4))
+    draw_factor = max(0.15, min(0.35, 0.25 - abs(elo_diff) * 0.5))
+    p_draw = draw_factor
+    remaining = 1.0 - p_draw
+    p_home = p_home_win * remaining
+    p_away = remaining - p_home
+
+    return {
+        "1x2": {
+            "home": round(p_home, 4),
+            "draw": round(p_draw, 4),
+            "away": round(p_away, 4),
+            "source": "elo_fallback",
+        }
+    }
+
+
+def _squash(x: float) -> float:
+    """Logistic squash: maps any real number to [0, 1] centered at 0.5."""
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def update_1x2_prior(prematch_prior: Dict, live_state: Dict) -> Dict:
+    """
+    Update pre-match 1X2 prior with live evidence using logistic adjustments.
+    """
+    prior = prematch_prior.get("1x2", {"home": 0.33, "draw": 0.33, "away": 0.33})
+
+    minute = live_state["minute"]
+    score_diff = live_state["score"]["home"] - live_state["score"]["away"]
+    xg_diff = live_state["xg_diff"]
+    time_factor = min(minute / 90, 1.0)
+
+    # Squash-based adjustments: no linear explosion, soft saturation
+    # Combined signal: xG diff (per-unit) + score diff (weighted by time)
+    signal = xg_diff * 1.5 + score_diff * 2.0 * time_factor
+    adjustment = _squash(signal) - 0.5  # shift from [0,1] to [-0.5, +0.5]
+
+    home = prior["home"] + adjustment
+    away = prior["away"] - adjustment
+
+    home = max(home, 0.05)
+    away = max(away, 0.05)
+
+    total = home + prior["draw"] + away
+    if total > 0:
+        home = round(home / total, 4)
+        draw = round(prior["draw"] / total, 4)
+        away = round(away / total, 4)
+    else:
+        home, draw, away = 0.33, 0.33, 0.34
+
+    confidence = "low"
+    if minute >= 45:
+        confidence = "high"
+    elif minute >= 30:
+        confidence = "medium"
+
+    return {
+        "probabilities": {"home": home, "draw": draw, "away": away},
+        "model_version": "prior_update_v1",
+        "calibrated": False,
+        "inputs_quality": live_state.get("data_quality", "medium"),
+        "top_factors": ["prematch_prior", "xg_diff", "score_diff", "minute"],
+        "prematch_source": prematch_prior.get("1x2", {}).get("source", "unknown"),
+        "confidence": confidence,
+        "warnings": live_state.get("warnings", []),
+    }
+
+
+def compute_live_analysis(match_data: Dict, prematch_prior: Dict = None) -> Optional[Dict]:
+    """
+    Compute live probability signals for in-progress matches.
+    Uses build_live_state → poisson_goal_engine + update_1x2_prior.
+    """
+    if not match_data:
+        return None
+
+    if prematch_prior is None:
+        prematch_prior = {"1x2": {"home": 0.333, "draw": 0.334, "away": 0.333, "source": "default"}}
+
+    summary = match_data.get("summary")
+    match_stats = match_data.get("match_stats") or {}
+
+    match_minute = _infer_minute(summary, match_stats)
+    injury_time = 0
+    if summary:
+        inj = summary.get("injuryTime")
+        if inj is not None:
+            injury_time = inj
+
+    state = build_live_state(match_data, match_minute, injury_time)
+
+    goal_markets = poisson_goal_engine(state)
+
+    x2f = update_1x2_prior(prematch_prior, state)
+
+    yc_home = state["yellow_cards"]["home"]
+    yc_away = state["yellow_cards"]["away"]
+    cards_total = yc_home + yc_away
+    # Require more cards to trigger signals — avoid false positives on sparse card data
+    cards_per_min = cards_total / max(state["minute"], 1)
+    cards_lean = "over" if cards_per_min > 0.06 else "under" if cards_per_min < 0.015 else None
+    cards_signal = "aggressive_match" if cards_per_min > 0.06 else "disciplined" if cards_per_min < 0.015 else "baseline"
+
+    corners_diff = state["corners"]["home"] - state["corners"]["away"]
+    shots_diff = state["shots"]["home"] - state["shots"]["away"]
+    if corners_diff > 2 or shots_diff > 4:
+        corner_lean = "home"
+        corner_signal = "home_pressure"
+    elif corners_diff < -2 or shots_diff < -4:
+        corner_lean = "away"
+        corner_signal = "away_pressure"
+    else:
+        corner_lean = None
+        corner_signal = "balanced"
+
+    x2f_probs = x2f["probabilities"]
+    return {
+        "total_goals_over_25": goal_markets["over_under_2_5"],
+        "total_goals_under_25": {
+            "probabilities": {"under": goal_markets["over_under_2_5"]["probabilities"]["under"]},
+            "model_version": goal_markets["over_under_2_5"]["model_version"],
+            "calibrated": False,
+            "inputs_quality": state["data_quality"],
+            "warnings": goal_markets["over_under_2_5"]["warnings"],
+        },
+        "btts_yes": {
+            "probabilities": {"yes": goal_markets["btts"]["probabilities"]["yes"]},
+            "model_version": goal_markets["btts"]["model_version"],
+            "calibrated": False,
+            "inputs_quality": state["data_quality"],
+            "top_factors": goal_markets["btts"]["top_factors"],
+            "warnings": goal_markets["btts"]["warnings"],
+        },
+        "btts_no": {
+            "probabilities": {"no": goal_markets["btts"]["probabilities"]["no"]},
+            "model_version": goal_markets["btts"]["model_version"],
+            "calibrated": False,
+            "inputs_quality": state["data_quality"],
+            "warnings": goal_markets["btts"]["warnings"],
+        },
+        "next_goal_home": {
+            "probabilities": {"home": goal_markets["next_goal"]["probabilities"]["home"]},
+            "model_version": goal_markets["next_goal"]["model_version"],
+            "calibrated": False,
+            "inputs_quality": state["data_quality"],
+            "top_factors": goal_markets["next_goal"]["top_factors"],
+            "warnings": goal_markets["next_goal"]["warnings"],
+        },
+        "next_goal_away": {
+            "probabilities": {"away": goal_markets["next_goal"]["probabilities"]["away"]},
+            "model_version": goal_markets["next_goal"]["model_version"],
+            "calibrated": False,
+            "inputs_quality": state["data_quality"],
+            "top_factors": goal_markets["next_goal"]["top_factors"],
+            "warnings": goal_markets["next_goal"]["warnings"],
+        },
+        "next_goal_no_more": {
+            "probabilities": {"no_more_goals": goal_markets["next_goal"]["probabilities"]["no_more_goals"]},
+            "model_version": goal_markets["next_goal"]["model_version"],
+            "calibrated": False,
+            "inputs_quality": state["data_quality"],
+            "warnings": goal_markets["next_goal"]["warnings"],
+        },
+        "next_corner": {
+            "lean": corner_lean,
+            "signal": corner_signal,
+            "confidence": "low",
+            "mode": "signal_only",
+        },
+        "total_cards": {
+            "lean": cards_lean,
+            "signal": cards_signal,
+            "confidence": "low",
+            "mode": "signal_only",
+        },
+        "1x2_final": x2f,
+        "match_minute": state["minute"],
+        "current_score": state["score"],
+        "warnings": state["warnings"],
+    }
 
 
 def normalize_match_status(status_data: Optional[Dict]) -> str:
@@ -1185,23 +2196,28 @@ def compute_team_player_aggregates(matches: List[Dict]) -> Dict:
             continue
         is_home = match.get("team_is_home", True)
         if is_home:
+            # Analyzed team was home in this match → their players are in home_players
             all_home_players.extend(ps.get("home_players", []))
+            # Opponent (away) players
             all_away_players.extend(ps.get("away_players", []))
         else:
-            # When the analyzed team was away, their players are in away_players from API perspective
-            all_away_players.extend(ps.get("home_players", []))
-            all_home_players.extend(ps.get("away_players", []))
+            # Analyzed team was away in this match.
+            # normalize_player_stats uses api_home_id=analyzed_team, api_away_id=opponent,
+            # so analyzed team's players are in away_players, opponent's in home_players.
+            all_away_players.extend(ps.get("away_players", []))
+            all_home_players.extend(ps.get("home_players", []))
 
     return {
-        "as_historical_home": compute_player_aggregates(all_home_players),
-        "as_historical_away": compute_player_aggregates(all_away_players),
+        "as_historical_home": compute_player_aggregates(all_home_players, include_individual=True),
+        "as_historical_away": compute_player_aggregates(all_away_players, include_individual=True),
     }
 
 
-def compute_player_aggregates(players: List[Dict]) -> Dict:
+def compute_player_aggregates(players: List[Dict], include_individual: bool = False) -> Dict:
     """
     Aggregate stats across all players of a team within a single match.
     Produces totals, per-90-minute rates, and distribution breakdowns.
+    If include_individual=True, also aggregates per-stat-key across all players.
     """
     if not players:
         return {}
@@ -1242,7 +2258,108 @@ def compute_player_aggregates(players: List[Dict]) -> Dict:
     totals["in_base_lineup_count"] = lineup_count
     totals["substitute_count"] = n - lineup_count
 
-    return totals
+    result = {"general": totals}
+
+    if include_individual:
+        # Stat key → category mapping
+        STAT_CATEGORIES: Dict[str, List[str]] = {
+            "offense":    ["GOALS", "EXPECTED_GOALS", "ASSISTS_GOAL", "EXPECTED_ASSISTS",
+                           "SHOTS_TOTAL", "SHOTS_ON_TARGET", "BIG_CHANCES_CREATED", "BIG_CHANCES_MISSED"],
+            "creation":   ["KEY_PASSES", "FINAL_THIRD_ENTRIES_TOTAL", "BOX_ENTRIES", "THROUGH_BALLS"],
+            "possession": ["TOUCHES_TOTAL", "MATCH_MINUTES_PLAYED", "PASSES_TOTAL"],
+            "defense":    ["DUELS_WON", "DUELS_TOTAL", "DUELS_EFFICIENCY", "TACKLES_WON",
+                           "INTERCEPTIONS", "BALL_RECOVERIES"],
+            "efficiency": ["PASSES_ACCURACY", "LONG_BALLS_ACCURACY", "CROSSES_ACCURACY",
+                          "DRIBBLES_EFFICIENCY"],
+            "discipline": ["FOULS_COMMITTED", "FOULS_SUFFERED", "CARDS_YELLOW", "CARDS_RED",
+                           "TURNOVERS", "ERRORS_LEAD_TO_SHOT", "ERRORS_LEAD_TO_GOAL"],
+            "goalkeeping":["SAVES_TOTAL", "GOALS_CONCEDED", "GOALS_PREVENTED",
+                           "EXPECTED_GOALS_ON_TARGET_FACED", "BIG_CHANCES_SAVED"],
+        }
+        # Flat whitelist of all allowed keys
+        ALLOWED_KEYS: set = {k for cat in STAT_CATEGORIES.values() for k in cat}
+
+        player_stats_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        player_positions: Dict[str, str] = {}
+        for p in players:
+            player_name = p.get("name") or p.get("player_name") or f"player_{id(p)}"
+            player_positions[player_name] = p.get("position") or "Unknown"
+            if player_name not in player_stats_map:
+                player_stats_map[player_name] = {}
+            player_stats = p.get("stats", {})
+            if not isinstance(player_stats, dict):
+                continue
+            for stat_key, stat_data in player_stats.items():
+                if stat_key not in ALLOWED_KEYS:
+                    continue
+                if not isinstance(stat_data, dict):
+                    continue
+                raw_val = stat_data.get("raw_value") if stat_data.get("raw_value") is not None else stat_data.get("value")
+                if raw_val is None:
+                    continue
+                try:
+                    numeric_val = float(raw_val)
+                except (ValueError, TypeError):
+                    continue
+                if stat_key not in player_stats_map[player_name]:
+                    player_stats_map[player_name][stat_key] = {"sum": 0.0, "count": 0}
+                player_stats_map[player_name][stat_key]["sum"] += numeric_val
+                player_stats_map[player_name][stat_key]["count"] += 1
+
+        individual = {}
+        for player_name, stat_aggregates in player_stats_map.items():
+            player_agg: Dict[str, Dict[str, Any]] = {}
+            player_agg["position"] = player_positions.get(player_name, "Unknown")
+            for cat_key, cat_keys in STAT_CATEGORIES.items():
+                cat_data: Dict[str, Any] = {}
+                for stat_key in cat_keys:
+                    agg = stat_aggregates.get(stat_key)
+                    if not agg:
+                        continue
+                    per_90 = round(agg["sum"] / total_90, 2) if total_90 > 0 else None
+                    cat_data[stat_key] = {
+                        "sum": round(agg["sum"], 2),
+                        "per_90": per_90,
+                        "matches": agg["count"],
+                    }
+                if cat_data:
+                    player_agg[cat_key] = cat_data
+
+            # Derived stats per player
+            derived: Dict[str, Any] = {}
+            goals     = stat_aggregates.get("GOALS", {}).get("sum", 0)
+            xg        = stat_aggregates.get("EXPECTED_GOALS", {}).get("sum", 0)
+            assists   = stat_aggregates.get("ASSISTS_GOAL", {}).get("sum", 0)
+            xa        = stat_aggregates.get("EXPECTED_ASSISTS", {}).get("sum", 0)
+            shots     = stat_aggregates.get("SHOTS_TOTAL", {}).get("sum", 0)
+            duels_won = stat_aggregates.get("DUELS_WON", {}).get("sum", 0)
+            duels_tot = stat_aggregates.get("DUELS_TOTAL", {}).get("sum", 0)
+            passes_tot= stat_aggregates.get("PASSES_TOTAL", {}).get("sum", 0)
+
+            if shots > 0:
+                derived["xg_per_shot"] = round(xg / shots, 3)
+            if xg > 0:
+                derived["goals_minus_xg"] = round(goals - xg, 2)
+            if xa > 0:
+                derived["xa_minus_assists"] = round(assists - xa, 2)
+            if duels_tot > 0:
+                derived["duels_win_pct"] = round(duels_won / duels_tot * 100, 1)
+            if total_90 > 0:
+                actions_per_90 = sum(
+                    stat_aggregates.get(k, {}).get("sum", 0)
+                    for k in ["TOUCHES_TOTAL", "PASSES_TOTAL", "SHOTS_TOTAL", "KEY_PASSES"]
+                )
+                derived["actions_per_90"] = round(actions_per_90 / total_90, 2)
+
+            if derived:
+                player_agg["derived"] = derived
+
+            if player_agg:
+                individual[player_name] = player_agg
+
+        result["individual"] = individual
+
+    return result
 
 
 
@@ -1534,18 +2651,18 @@ def validate_data_completeness(ctx: Dict) -> Dict[str, List[str]]:
     Returns a dict with warnings categorized by section.
     """
     result: Dict[str, List[str]] = {
-        "team_home_results": [],
-        "team_away_results": [],
+        "home_team_results": [],
+        "away_team_results": [],
         "odds": [],
     }
 
     odds = ctx.get("odds", {})
-    team_h = ctx.get("team_home_results", {}).get("basic_stats", {})
-    team_a = ctx.get("team_away_results", {}).get("basic_stats", {})
+    team_h = ctx.get("home_team_results", {}).get("basic_stats", {})
+    team_a = ctx.get("away_team_results", {}).get("basic_stats", {})
 
     prob_h = odds.get("prob_home")
-    if prob_h and team_h.get("gf_avg") and team_a.get("gf_avg"):
-        form_diff = team_h["gf_avg"] - team_a["gf_avg"]
+    if prob_h and team_h.get("home_gf_avg") and team_a.get("home_gf_avg"):
+        form_diff = team_h["home_gf_avg"] - team_a["home_gf_avg"]
         if form_diff > FORM_DIFF_THRESHOLD and prob_h < 40:
             result["odds"].append("Market undervaluing home team despite stronger recent form [IND]")
         elif form_diff < -FORM_DIFF_THRESHOLD and prob_h > 60:
@@ -1559,7 +2676,7 @@ def _compute_top_level_stats(matches: List[Dict]) -> Dict:
     Compute top-level summary stats (total_matches, wins, draws, losses,
     goals_for, goals_against, total_goals, both_teams_scored) from a list
     of matches. Supports two formats:
-    - team_home_results/away_results: goals_for, goals_against, total_goals
+    - home_team_results/away_results: goals_for, goals_against, total_goals
     - h2h: home_score, away_score, team_is_home (computes goals_for from orientation)
     """
     wins = draws = losses = 0
@@ -1625,14 +2742,15 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         "odds": {},
         "implied_probs": {},
         "h2h": {},
-        "team_home_results": {},
-        "team_away_results": {},
+        "home_team_results": {},
+        "away_team_results": {},
         "standings": {},
         "overunder_standings": {},
         "form_standings": {},
         "top_scorers": {},
         "tournament_top_scorers": {},
         "indicators": {},
+        "prematch_priors": {},
     }
 
     # -------------------------------------------------------------------------
@@ -1687,22 +2805,31 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     # -------------------------------------------------------------------------
     # 3. TEAM RESULTS (historical form) — H2H is built from these below
     # -------------------------------------------------------------------------
-    final["team_home_results"] = {"warnings": [f"Team results for {home_name} not available [N/A]"]}
+    final["home_team_results"] = {"warnings": [f"Team results for {home_name} not available [N/A]"]}
     tr_home = fetch_team_results(home_team_id)
     if tr_home is not None:
-        final["team_home_results"] = normalize_team_results(tr_home, home_name, home_team_id)
+        final["home_team_results"] = normalize_team_results(tr_home, home_name, home_team_id)
 
-    final["team_away_results"] = {"warnings": [f"Team results for {away_name} not available [N/A]"]}
+    final["away_team_results"] = {"warnings": [f"Team results for {away_name} not available [N/A]"]}
     tr_away = fetch_team_results(away_team_id)
     if tr_away is not None:
-        final["team_away_results"] = normalize_team_results(tr_away, away_name, away_team_id)
+        final["away_team_results"] = normalize_team_results(tr_away, away_name, away_team_id)
+
+    # -------------------------------------------------------------------------
+    # PREMATCH PRIORS (for live 1X2) — uses odds + team results
+    # -------------------------------------------------------------------------
+    final["prematch_priors"] = compute_prematch_priors(
+        final["odds"],
+        final["home_team_results"],
+        final["away_team_results"],
+    )
 
     # -------------------------------------------------------------------------
     # 4. H2H — built from team_results (no extra API call)
     # -------------------------------------------------------------------------
     h2h = build_h2h_from_results(
-        final["team_home_results"],
-        final["team_away_results"],
+        final["home_team_results"],
+        final["away_team_results"],
         home_name,
         away_name,
     )
@@ -1714,8 +2841,8 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
     seen = set()
     past_match_ids = []
     for match_list in [
-        final["team_home_results"].get("matches", []),
-        final["team_away_results"].get("matches", []),
+        final["home_team_results"].get("matches", []),
+        final["away_team_results"].get("matches", []),
     ]:
         for m in match_list:
             ts = m.get("timestamp", 0)
@@ -1778,78 +2905,65 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         else:
             match["player_stats"] = {"home_players": [], "away_players": [], "warnings": ["Player stats not available [N/A]"]}
 
+    # Compute h2h advanced stats split by current home/away BEFORE enrichment,
+    # since _enrich_match overwrites advanced_stats on each match.
+    _h2h_adv = compute_h2h_advanced_stats(
+        final["h2h"].get("matches", []),
+        stats_map,
+        final["match"]["home_team"],
+        final["match"]["away_team"],
+    )
+
     # Enrich all three collections with the shared helper
-    for match in final["team_home_results"].get("matches", []):
+    for match in final["home_team_results"].get("matches", []):
         _enrich_match(match, stats_map, player_stats_map, home_team_id, away_team_id)
 
-    for match in final["team_away_results"].get("matches", []):
+    for match in final["away_team_results"].get("matches", []):
         _enrich_match(match, stats_map, player_stats_map, home_team_id, away_team_id)
 
     for rec in final["h2h"].get("matches", []):
         _enrich_match(rec, stats_map, player_stats_map, home_team_id, away_team_id)
 
     # Compute advanced stats for each team (basic_stats already at top level)
-    final["team_home_results"]["advanced_stats"] = compute_advanced_form(
-        final["team_home_results"]["matches"]
+    final["home_team_results"]["advanced_stats"] = compute_advanced_form(
+        final["home_team_results"]["matches"]
     )
-    final["team_away_results"]["advanced_stats"] = compute_advanced_form(
-        final["team_away_results"]["matches"]
+    final["away_team_results"]["advanced_stats"] = compute_advanced_form(
+        final["away_team_results"]["matches"]
     )
-    final["h2h"]["advanced_stats"] = compute_advanced_form(
-        final["h2h"].get("matches", [])
-    )
+    # h2h advanced stats already computed above with home/away split
+    final["h2h"]["advanced_stats"] = {
+        "home_team": _h2h_adv["home_team"],
+        "away_team": _h2h_adv["away_team"],
+    }
 
     # Aggregate player stats across all historical matches per team
-    _home_ps = compute_team_player_aggregates(final["team_home_results"].get("matches", []))
-    _away_ps = compute_team_player_aggregates(final["team_away_results"].get("matches", []))
+    _home_ps = compute_team_player_aggregates(final["home_team_results"].get("matches", []))
+    _away_ps = compute_team_player_aggregates(final["away_team_results"].get("matches", []))
     _h2h_ps = compute_team_player_aggregates(final["h2h"].get("matches", []))
 
     # Promote player_stats inner keys and remove wrapper
-    final["team_home_results"]["player_stats_as_home"] = _home_ps.get("as_historical_home", {})
-    final["team_home_results"]["player_stats_as_away"] = _home_ps.get("as_historical_away", {})
-    final["team_away_results"]["player_stats_as_home"] = _away_ps.get("as_historical_home", {})
-    final["team_away_results"]["player_stats_as_away"] = _away_ps.get("as_historical_away", {})
-    final["h2h"]["player_stats_as_home"] = _h2h_ps.get("as_historical_home", {})
-    final["h2h"]["player_stats_as_away"] = _h2h_ps.get("as_historical_away", {})
+    final["home_team_results"]["player_stats_as_home"] = _home_ps.get("as_historical_home", {})
+    final["home_team_results"]["player_stats_as_away"] = _home_ps.get("as_historical_away", {})
+    final["away_team_results"]["player_stats_as_home"] = _away_ps.get("as_historical_home", {})
+    final["away_team_results"]["player_stats_as_away"] = _away_ps.get("as_historical_away", {})
+    final["h2h"]["home_team_player_stats"] = _h2h_ps.get("as_historical_home", {})
+    final["h2h"]["away_team_player_stats"] = _h2h_ps.get("as_historical_away", {})
 
     # Remove leftover wrappers (player_stats only — form was already replaced)
-    for _section in [final["team_home_results"], final["team_away_results"], final["h2h"]]:
+    for _section in [final["home_team_results"], final["away_team_results"], final["h2h"]]:
         _section.pop("player_stats", None)
 
     # Strip individual match-level advanced_stats and player_stats from JSON output.
     # Aggregates (advanced_stats, player_stats_as_*) were already computed above.
     for _matches_list in [
-        final["team_home_results"].get("matches", []),
-        final["team_away_results"].get("matches", []),
+        final["home_team_results"].get("matches", []),
+        final["away_team_results"].get("matches", []),
         final["h2h"].get("matches", []),
     ]:
         for _m in _matches_list:
             _m.pop("advanced_stats", None)
             _m.pop("player_stats", None)
-
-    # Add top-level summary stats to team_home_results and team_away_results
-    final["team_home_results"] = {
-        **final["team_home_results"],
-        **_compute_top_level_stats(final["team_home_results"].get("matches", [])),
-    }
-    final["team_away_results"] = {
-        **final["team_away_results"],
-        **_compute_top_level_stats(final["team_away_results"].get("matches", [])),
-    }
-
-    # Add top-level summary stats to h2h with team-oriented naming for clarity
-    _h2h_stats = _compute_top_level_stats(final["h2h"].get("matches", []))
-    final["h2h"] = {
-        **final["h2h"],
-        "total_matches": _h2h_stats["total_matches"],
-        "team_home_wins": _h2h_stats["wins"],
-        "team_away_wins": _h2h_stats["losses"],
-        "draws": _h2h_stats["draws"],
-        "team_home_goals_for": _h2h_stats["goals_for"],
-        "team_away_goals_for": _h2h_stats["goals_against"],
-        "total_goals": _h2h_stats["total_goals"],
-        "both_teams_scored": _h2h_stats["both_teams_scored"],
-    }
 
     # -------------------------------------------------------------------------
     # 5. LINEUPS / MISSING PLAYERS
@@ -1870,6 +2984,35 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
         final["match"]["preview"] = preview_raw
     else:
         final["match"]["preview"] = None
+
+    # -------------------------------------------------------------------------
+    # 1.5 ANOTHER MATCH DATA
+    # -------------------------------------------------------------------------
+    if final["match"].get("status") == "inprogress" or final["match"].get("status") == "finished":
+        time.sleep(API_SLEEP_INITIAL)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(api_get, "/matches/match/summary", {"match_id": event_id}): "summary",
+                executor.submit(api_get, "/matches/match/commentary", {"match_id": event_id}): "commentary",
+                executor.submit(api_get, "/matches/match/stats", {"match_id": event_id}): "match_stats",
+                executor.submit(api_get, "/matches/match/player-stats", {"match_id": event_id}): "player_stats",
+            }
+            results = {name: future.result() for future, name in futures.items()}
+
+        final["match"]["summary"] = normalize_summary(results.get("summary"))
+        final["match"]["commentary"] = normalize_commentary(results.get("commentary"))
+        final["match"]["match_stats"] = normalize_match_stats(results.get("match_stats"))
+        final["match"]["player_stats"] = normalize_player_stats(results.get("player_stats"), home_team_id, away_team_id)
+    else:
+        final["match"]["summary"] = None
+        final["match"]["commentary"] = None
+        final["match"]["match_stats"] = None
+        final["match"]["player_stats"] = {"home_players": [], "away_players": [], "warnings": []}
+        
+    # -------------------------------------------------------------------------
+    # 1.6 LIVE ANALYSIS DATA (inprogress only)
+    # -------------------------------------------------------------------------
+    final["match"]["live_analysis"] = compute_live_analysis(final["match"], final["prematch_priors"]) if final["match"].get("status") == "inprogress" else None
 
     # -------------------------------------------------------------------------
     # 10. TOURNAMENT STANDINGS
@@ -1924,8 +3067,8 @@ def build_context(event_id: str, home_team_id: str, away_team_id: str) -> Dict:
 
     # Cross-check warnings
     completeness = validate_data_completeness(final)
-    final["team_home_results"]["warnings"].extend(completeness["team_home_results"])
-    final["team_away_results"]["warnings"].extend(completeness["team_away_results"])
+    final["home_team_results"]["warnings"].extend(completeness["home_team_results"])
+    final["away_team_results"]["warnings"].extend(completeness["away_team_results"])
     final["odds"]["warnings"].extend(completeness["odds"])
 
     return final
